@@ -20,7 +20,7 @@ NexusFM se compila en **1 segundo** utilizando el motor nativo de C# / WPF inclu
 
 ##  Características Únicas de la Suite
 
-### 1. 🪟 Interceptor y Reemplazo Real del Explorador de Windows (Con Retorno en 1 Clic)
+### 1. Interceptor y Reemplazo Real del Explorador de Windows (Con Retorno en 1 Clic)
 * **Interceptación automática Win32 (`CabinetWClass` + `Shell.Application`)**: Cuando el modo reemplazo está activo, al abrir cualquier carpeta desde tu **Escritorio de Windows**, presionar `Win + E` o hacer clic en el icono del Explorador de la barra de tareas, NexusFM captura la ruta solicitada, cierra la ventana clásica de Windows en milisegundos y abre la carpeta directamente en NexusFM.
 * **Regreso instantáneo a Windows**: Desde el panel lateral **`⚙ Personalizar`**, puedes desactivar el reemplazo o hacer clic en **`Regresar a Windows Explorer y Salir`** para restaurar `explorer.exe` inmediatamente en cualquier momento.
 
@@ -37,14 +37,14 @@ NexusFM se compila en **1 segundo** utilizando el motor nativo de C# / WPF inclu
 ### 3.  Analizador Visual de Espacio en Disco (`F9`)
 * Escanea al instante la carpeta activa y sus subdirectorios, generando un gráfico de barras proporcionales con el porcentaje y peso exacto de cada carpeta y archivo para detectar qué consume espacio en tu disco.
 
-### 4. ✎ Nexus Studio Editor Integrado (`Ctrl + E`) y Verificador SHA-256
+### 4. Nexus Studio Editor Integrado (`Ctrl + E`) y Verificador SHA-256
 * **Editor de Código y Notas in-situ**: Selecciona cualquier archivo de código o texto (`.cs`, `.rs`, `.py`, `.js`, `.json`, `.md`, `.txt`, `.bat`, `.ini`) y presiona `Ctrl + E` (o clic derecho → *Editar en Nexus Studio Editor*) para modificarlo y guardarlo con `Ctrl + S` sin salir del explorador.
 * **Verificador Criptográfico SHA-256**: En el panel inspector (`F11`) o mediante clic derecho puedes calcular y copiar al portapapeles el hash `SHA-256` de cualquier ejecutable, ISO o archivo en un clic.
 
 ### 5. Filtrado Inteligente "Buscar por Tipo" y Ubicaciones Recientes
 * En la barra lateral izquierda puedes filtrar instantáneamente cualquier directorio por categoría: **Documentos**, **Imágenes**, **Audio**, **Videos** o **Código fuente**, además de consultar tu historial de **Ubicaciones recientes**.
 
-### 6. ◫ Doble Panel (`F3`), Pestañas Conectadas (`Ctrl+T`) y Terminal Sincronizada (`F4`)
+### 6. Doble Panel (`F3`), Pestañas Conectadas (`Ctrl+T`) y Terminal Sincronizada (`F4`)
 * Divide la pantalla en dos paneles independientes con `F3`, alterna entre ellos con `Tab`, copia de un panel al otro con `F5` o mueve con `F6`.
 * La terminal integrada (`F4`) ejecuta comandos reales de PowerShell en la carpeta activa; si ejecutas `cd <carpeta>`, el panel visual cambia a ese directorio automáticamente.
 
