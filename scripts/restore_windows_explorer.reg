@@ -1,0 +1,11 @@
+Windows Registry Editor Version 5.00
+
+; ============================================================================
+; NexusFM - Restaurar el Explorador nativo de Windows (explorer.exe)
+; ============================================================================
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell]
+@="none"
+
+[-HKEY_CURRENT_USER\Software\Classes\Directory\shell\openin_nexusfm]
+[-HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\openin_nexusfm]

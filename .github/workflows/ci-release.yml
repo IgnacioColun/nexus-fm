@@ -1,0 +1,30 @@
+name: Build & Release NexusFM (Windows Native)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile C# WPF Native Executable (Zero External Dependencies)
+        run: |
+          & "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /out:"NexusFM.exe" `
+            /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationFramework.dll" `
+            /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationCore.dll" `
+            /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" `
+            /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Xaml.dll" `
+            "src-csharp\NexusFM.cs"
+
+      - name: Upload NexusFM.exe Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexusFM-Windows-Portable
+          path: NexusFM.exe

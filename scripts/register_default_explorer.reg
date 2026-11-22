@@ -1,0 +1,26 @@
+Windows Registry Editor Version 5.00
+
+; ============================================================================
+; NexusFM - Reemplazo seguro del Explorador de Archivos de Windows (Por Usuario)
+; ============================================================================
+; Este script registra NexusFM en HKCU (sin requerir tocar archivos del sistema
+; ni romper la barra de tareas de explorer.exe). Al abrir cualquier carpeta,
+; Windows usará NexusFM por defecto.
+; NOTA: Ajusta la ruta a tu ejecutable compilado antes de importarlo.
+; ============================================================================
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell]
+@="openin_nexusfm"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\openin_nexusfm]
+@="Abrir en NexusFM"
+"Icon"="\"C:\\Program Files\\NexusFM\\nexus-fm.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell\openin_nexusfm\command]
+@="\"C:\\Program Files\\NexusFM\\nexus-fm.exe\" \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\openin_nexusfm]
+@="Abrir aquí NexusFM"
+
+[HKEY_CURRENT_USER\Software\Classes\Directory\Background\shell\openin_nexusfm\command]
+@="\"C:\\Program Files\\NexusFM\\nexus-fm.exe\" \"%V\""

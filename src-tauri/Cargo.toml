@@ -1,0 +1,18 @@
+[package]
+name = "nexus-fm"
+version = "0.1.0"
+description = "Explorador de archivos de doble panel estilo KDE Dolphin para Windows, 100% navegable por teclado y altamente personalizable."
+authors = ["Ignacio"]
+license = "MIT"
+repository = "https://github.com/tu-usuario/nexus-fm"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+open = "5.3"

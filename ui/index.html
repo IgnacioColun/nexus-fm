@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NexusFM — Dolphin-Style Dual-Pane File Manager</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body data-theme="breeze-dark" data-density="normal">
+  <!-- BARRA SUPERIOR ESTILO DOLPHIN -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand">
+        <span class="brand-logo">◈</span>
+        <span class="brand-title">NexusFM</span>
+        <span class="brand-badge" id="runtime-badge">UI + Tauri Ready</span>
+      </div>
+      <div class="nav-controls">
+        <button class="btn-icon" id="btn-back" title="Atrás (Alt+←)">◀</button>
+        <button class="btn-icon" id="btn-forward" title="Adelante (Alt+→)">▶</button>
+        <button class="btn-icon" id="btn-up" title="Subir nivel (Backspace)">▲</button>
+        <button class="btn-icon" id="btn-refresh" title="Recargar (F5 / Ctrl+R)">↻</button>
+      </div>
+    </div>
+
+    <div class="topbar-center">
+      <button class="btn-tool" id="btn-cmd-palette" title="Paleta de comandos (Ctrl+K)">
+        <span>⌘ Buscar acción o ruta...</span>
+        <kbd>Ctrl+K</kbd>
+      </button>
+    </div>
+
+    <div class="topbar-right">
+      <button class="btn-tool active" id="btn-toggle-split" title="Alternar Doble Panel (F3)">
+        <span>◫ Dividir</span>
+        <kbd>F3</kbd>
+      </button>
+      <button class="btn-tool active" id="btn-toggle-terminal" title="Alternar Terminal Integrada (F4)">
+        <span>❯_ Terminal</span>
+        <kbd>F4</kbd>
+      </button>
+      <button class="btn-tool active" id="btn-toggle-info" title="Panel de Vista Previa / Info (F11)">
+        <span>ℹ Vista Previa</span>
+        <kbd>F11</kbd>
+      </button>
+      <button class="btn-tool" id="btn-open-settings" title="Personalizar Interfaz y Temas (Ctrl+,)">
+        <span>⚙ Personalizar</span>
+      </button>
+      <button class="btn-icon" id="btn-open-help" title="Atajos de Teclado (?)">?</button>
+    </div>
+  </header>
+
+  <!-- CONTENEDOR PRINCIPAL -->
+  <div class="workspace" id="workspace">
+    <!-- BARRA LATERAL IZQUIERDA (LUGARES / DISPOSITIVOS ESTILO DOLPHIN) -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-heading">LUGARES (PLACES)</div>
+        <ul class="places-list" id="places-list"></ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-heading">DISPOSITIVOS / UNIDADES</div>
+        <ul class="places-list" id="drives-list"></ul>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-heading">ETIQUETAS RÁPIDAS</div>
+        <ul class="places-list" id="tags-list">
+          <li class="place-item" data-filter="CODE"><span class="tag-dot tag-blue"></span> Código fuente</li>
+          <li class="place-item" data-filter="DOC"><span class="tag-dot tag-green"></span> Documentos</li>
+          <li class="place-item" data-filter="ALL"><span class="tag-dot tag-amber"></span> Mostrar todo</li>
+        </ul>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="keymode-indicator">
+          <span>Modo teclado:</span>
+          <strong id="active-keymode-label">Dolphin + Vim</strong>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ÁREA CENTRAL: DOBLE PANEL + TERMINAL INTEGRADA -->
+    <main class="center-stage">
+      <div class="panes-container" id="panes-container">
+        <!-- PANEL IZQUIERDO -->
+        <section class="file-pane active" id="pane-left" data-pane="left" tabindex="0">
+          <div class="pane-tabs-bar">
+            <div class="tabs-list" id="tabs-left"></div>
+            <button class="btn-new-tab" data-pane="left" title="Nueva pestaña (Ctrl+T)">+</button>
+          </div>
+
+          <div class="pane-toolbar">
+            <div class="breadcrumbs-wrapper" id="breadcrumbs-wrap-left">
+              <div class="breadcrumbs" id="breadcrumbs-left"></div>
+              <input type="text" class="path-input hidden" id="path-input-left" placeholder="Escribe una ruta y presiona Enter..." />
+            </div>
+            <div class="pane-actions">
+              <input type="text" class="filter-input" id="filter-left" placeholder="Filtrar (Ctrl+F)..." />
+              <button class="btn-mini" data-action="view-list" data-pane="left" title="Vista Detalles">☰</button>
+              <button class="btn-mini" data-action="view-grid" data-pane="left" title="Vista Cuadrícula">⊞</button>
+            </div>
+          </div>
+
+          <div class="pane-table-header">
+            <span class="col-name" data-sort="name" data-pane="left">Nombre ▾</span>
+            <span class="col-ext" data-sort="ext" data-pane="left">Tipo</span>
+            <span class="col-size" data-sort="size" data-pane="left">Tamaño</span>
+            <span class="col-date" data-sort="date" data-pane="left">Modificado</span>
+          </div>
+
+          <div class="pane-files" id="files-left"></div>
+
+          <div class="pane-statusbar" id="status-left">
+            <span class="status-count">0 elementos</span>
+            <span class="status-selected">0 seleccionados</span>
+            <span class="status-hint">Tab: Cambiar panel • Espacio: Seleccionar</span>
+          </div>
+        </section>
+
+        <!-- PANEL DERECHO (SPLIT VIEW - F3) -->
+        <section class="file-pane" id="pane-right" data-pane="right" tabindex="0">
+          <div class="pane-tabs-bar">
+            <div class="tabs-list" id="tabs-right"></div>
+            <button class="btn-new-tab" data-pane="right" title="Nueva pestaña (Ctrl+T)">+</button>
+          </div>
+
+          <div class="pane-toolbar">
+            <div class="breadcrumbs-wrapper" id="breadcrumbs-wrap-right">
+              <div class="breadcrumbs" id="breadcrumbs-right"></div>
+              <input type="text" class="path-input hidden" id="path-input-right" placeholder="Escribe una ruta y presiona Enter..." />
+            </div>
+            <div class="pane-actions">
+              <input type="text" class="filter-input" id="filter-right" placeholder="Filtrar (Ctrl+F)..." />
+              <button class="btn-mini" data-action="view-list" data-pane="right" title="Vista Detalles">☰</button>
+              <button class="btn-mini" data-action="view-grid" data-pane="right" title="Vista Cuadrícula">⊞</button>
+            </div>
+          </div>
+
+          <div class="pane-table-header">
+            <span class="col-name" data-sort="name" data-pane="right">Nombre ▾</span>
+            <span class="col-ext" data-sort="ext" data-pane="right">Tipo</span>
+            <span class="col-size" data-sort="size" data-pane="right">Tamaño</span>
+            <span class="col-date" data-sort="date" data-pane="right">Modificado</span>
+          </div>
+
+          <div class="pane-files" id="files-right"></div>
+
+          <div class="pane-statusbar" id="status-right">
+            <span class="status-count">0 elementos</span>
+            <span class="status-selected">0 seleccionados</span>
+            <span class="status-hint">F5: Copiar al otro panel • F6: Mover</span>
+          </div>
+        </section>
+      </div>
+
+      <!-- BARRA DE ACCIONES RÁPIDAS POR TECLADO (ESTILO DOLPHIN / COMMANDER) -->
+      <div class="fn-keybar">
+        <button class="fn-btn" data-fn="rename"><kbd>F2</kbd> Renombrar</button>
+        <button class="fn-btn" data-fn="split"><kbd>F3</kbd> Doble Panel</button>
+        <button class="fn-btn" data-fn="terminal"><kbd>F4</kbd> Terminal</button>
+        <button class="fn-btn" data-fn="copy"><kbd>F5</kbd> Copiar → Panel</button>
+        <button class="fn-btn" data-fn="move"><kbd>F6</kbd> Mover → Panel</button>
+        <button class="fn-btn" data-fn="mkdir"><kbd>F7</kbd> Nueva Carpeta</button>
+        <button class="fn-btn" data-fn="newfile"><kbd>Ctrl+N</kbd> Nuevo Archivo</button>
+        <button class="fn-btn danger" data-fn="delete"><kbd>F8 / Supr</kbd> Eliminar</button>
+      </div>
+
+      <!-- TERMINAL INTEGRADA (F4) SINCRONIZADA CON EL PANEL ACTIVO -->
+      <section class="terminal-dock" id="terminal-dock">
+        <div class="terminal-header">
+          <div class="terminal-title">
+            <span class="term-dot"></span>
+            <span>TERMINAL INTEGRADA (PowerShell / NexusShell)</span>
+            <span class="terminal-cwd-badge" id="terminal-cwd-badge">C:\Users\ignac</span>
+          </div>
+          <div class="terminal-controls">
+            <label class="sync-toggle">
+              <input type="checkbox" id="chk-sync-terminal" checked />
+              <span>Sincronizar con panel activo</span>
+            </label>
+            <button class="btn-mini" id="btn-clear-terminal" title="Limpiar terminal">Limpiar</button>
+            <button class="btn-mini" id="btn-close-terminal" title="Ocultar (F4)">✕</button>
+          </div>
+        </div>
+        <div class="terminal-output" id="terminal-output"></div>
+        <form class="terminal-input-row" id="terminal-form">
+          <span class="terminal-prompt" id="terminal-prompt">PS C:\Users\ignac&gt;</span>
+          <input
+            type="text"
+            id="terminal-input"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Escribe un comando (ej: ls, cd Proyectos, mkdir demo, cat README.md, git status, help)..."
+          />
+        </form>
+      </section>
+    </main>
+
+    <!-- PANEL DERECHO DE INFORMACIÓN / VISTA PREVIA ESTILO DOLPHIN (F11) -->
+    <aside class="info-dock" id="info-dock">
+      <div class="info-header">
+        <span>VISTA PREVIA E INFORMACIÓN</span>
+        <button class="btn-mini" id="btn-close-info" title="Cerrar (F11)">✕</button>
+      </div>
+      <div class="info-content" id="info-content">
+        <div class="preview-icon" id="preview-icon">📁</div>
+        <h3 class="preview-title" id="preview-title">Selecciona un elemento</h3>
+        <div class="preview-meta" id="preview-meta"></div>
+        <div class="preview-box-label">CONTENIDO / VISTA PREVIA</div>
+        <pre class="preview-code" id="preview-code">Navega con las flechas ↑/↓ o el mouse para inspeccionar archivos en tiempo real.</pre>
+      </div>
+    </aside>
+  </div>
+
+  <!-- MENÚ CONTEXTUAL (CLIC DERECHO) -->
+  <div class="context-menu hidden" id="context-menu">
+    <button data-ctx="open">📂 Abrir / Entrar (Enter)</button>
+    <button data-ctx="new-tab">📑 Abrir en nueva pestaña (Ctrl+T)</button>
+    <hr />
+    <button data-ctx="copy-other">⇄ Copiar al otro panel (F5)</button>
+    <button data-ctx="move-other">➔ Mover al otro panel (F6)</button>
+    <hr />
+    <button data-ctx="rename">✏️ Renombrar (F2)</button>
+    <button data-ctx="mkdir">📁 Nueva carpeta (F7)</button>
+    <button data-ctx="newfile">📄 Nuevo archivo (Ctrl+N)</button>
+    <hr />
+    <button data-ctx="delete" class="ctx-danger">🗑️ Eliminar (Supr)</button>
+  </div>
+
+  <!-- MODAL DE PERSONALIZACIÓN AVANZADA (CTRL+,) -->
+  <div class="modal-backdrop hidden" id="settings-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>⚙ Estudio de Personalización de NexusFM</h2>
+        <button class="btn-icon" id="btn-close-settings">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="settings-grid">
+          <div class="setting-group">
+            <label>Tema Visual (Preset)</label>
+            <select id="select-theme">
+              <option value="breeze-dark">KDE Breeze Dark (Dolphin Original)</option>
+              <option value="catppuccin">Catppuccin Mocha</option>
+              <option value="nord">Nordic Frost</option>
+              <option value="win11-mica">Windows 11 Fluent Dark</option>
+              <option value="cyberpunk">Cyberpunk Neon</option>
+            </select>
+          </div>
+
+          <div class="setting-group">
+            <label>Color de Acento Personalizado</label>
+            <input type="color" id="input-accent" value="#3daee9" />
+          </div>
+
+          <div class="setting-group">
+            <label>Densidad de Filas</label>
+            <select id="select-density">
+              <option value="compact">Compacta (Power User)</option>
+              <option value="normal" selected>Normal (Dolphin Estándar)</option>
+              <option value="comfortable">Espaciada (Táctil / Cómoda)</option>
+            </select>
+          </div>
+
+          <div class="setting-group">
+            <label>Perfil de Navegación por Teclado</label>
+            <select id="select-keymode">
+              <option value="dolphin-vim" selected>Dolphin + Vim (Flechas + hjkl + F-Keys)</option>
+              <option value="standard">Estándar Windows / Dolphin (Flechas + F-Keys)</option>
+            </select>
+          </div>
+
+          <div class="setting-group">
+            <label>Tamaño de Fuente Base (<span id="font-size-val">13px</span>)</label>
+            <input type="range" id="input-fontsize" min="11" max="17" value="13" />
+          </div>
+
+          <div class="setting-group">
+            <label>Reemplazo del Explorador de Windows</label>
+            <div class="reg-helper-box">
+              <p>Usa los scripts incluidos en <code>scripts/register_default_explorer.reg</code> para registrar NexusFM como manejador predeterminado de carpetas en Windows sin dañar <code>explorer.exe</code>.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-tool" id="btn-reset-settings">Restaurar Valores</button>
+        <button class="btn-tool active" id="btn-save-settings">Listo</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL DE ATAJOS DE TECLADO (?) -->
+  <div class="modal-backdrop hidden" id="help-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>⌨️ Navegación 100% por Teclado y Mouse</h2>
+        <button class="btn-icon" id="btn-close-help">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="shortcuts-columns">
+          <div>
+            <h4>Navegación y Paneles</h4>
+            <ul class="shortcut-list">
+              <li><kbd>↑</kbd> <kbd>↓</kbd> o <kbd>j</kbd> <kbd>k</kbd> <span>Mover cursor</span></li>
+              <li><kbd>Enter</kbd> o <kbd>l</kbd> <span>Abrir carpeta / archivo</span></li>
+              <li><kbd>Backspace</kbd> o <kbd>h</kbd> <span>Subir al directorio padre</span></li>
+              <li><kbd>Tab</kbd> <span>Cambiar entre Panel Izquierdo y Derecho</span></li>
+              <li><kbd>Espacio</kbd> <span>Seleccionar/Deseleccionar ítem actual</span></li>
+              <li><kbd>Ctrl+A</kbd> <span>Seleccionar todos los elementos</span></li>
+              <li><kbd>Ctrl+L</kbd> <span>Editar barra de dirección manualmente</span></li>
+              <li><kbd>Ctrl+F</kbd> o <kbd>/</kbd> <span>Filtrar archivos en tiempo real</span></li>
+            </ul>
+          </div>
+          <div>
+            <h4>Pestañas, Vistas y Operaciones</h4>
+            <ul class="shortcut-list">
+              <li><kbd>Ctrl+T</kbd> <span>Nueva pestaña en el panel activo</span></li>
+              <li><kbd>Ctrl+W</kbd> <span>Cerrar pestaña actual</span></li>
+              <li><kbd>Ctrl+Tab</kbd> <span>Siguiente pestaña</span></li>
+              <li><kbd>F2</kbd> <span>Renombrar elemento seleccionado</span></li>
+              <li><kbd>F3</kbd> <span>Activar / Desactivar Doble Panel</span></li>
+              <li><kbd>F4</kbd> <span>Mostrar / Ocultar Terminal Integrada</span></li>
+              <li><kbd>F5</kbd> <span>Copiar selección al panel opuesto</span></li>
+              <li><kbd>F6</kbd> <span>Mover selección al panel opuesto</span></li>
+              <li><kbd>F7</kbd> <span>Crear nueva carpeta</span></li>
+              <li><kbd>F8</kbd> / <kbd>Supr</kbd> <span>Eliminar selección</span></li>
+              <li><kbd>F11</kbd> <span>Alternar panel de Vista Previa</span></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PALETA DE COMANDOS (CTRL+K) -->
+  <div class="modal-backdrop hidden" id="palette-modal">
+    <div class="modal-card palette-card">
+      <input type="text" id="palette-input" placeholder="Escribe un comando o ruta (ej: 'Alternar doble panel', 'Tema Catppuccin', 'Nueva carpeta')..." autocomplete="off" />
+      <ul class="palette-list" id="palette-list"></ul>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
