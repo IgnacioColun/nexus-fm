@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Explorador de archivos de doble panel estilo KDE Dolphin para Windows, 100% navegable por teclado y altamente personalizable."
 authors = ["Ignacio"]
 license = "MIT"
-repository = "https://github.com/tu-usuario/nexus-fm"
+repository = "https://github.com/IgnacioColun/nexus-fm"
 edition = "2021"
 
 [build-dependencies]

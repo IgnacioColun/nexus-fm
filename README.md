@@ -9,7 +9,7 @@
 
 ---
 
-## ⚡ Inicio Instantáneo (Sin Instalar Dependencias Externas)
+##  Inicio Instantáneo (Sin Instalar Dependencias Externas)
 
 NexusFM se compila en **1 segundo** utilizando el motor nativo de C# / WPF incluido de fábrica en cualquier instalación de Windows 10 y Windows 11 (`csc.exe`), generando un ejecutable ligero y 100% portable (`~85 KB`).
 
@@ -18,13 +18,13 @@ NexusFM se compila en **1 segundo** utilizando el motor nativo de C# / WPF inclu
 
 ---
 
-## 🌟 Características Únicas de la Suite
+##  Características Únicas de la Suite
 
 ### 1. 🪟 Interceptor y Reemplazo Real del Explorador de Windows (Con Retorno en 1 Clic)
 * **Interceptación automática Win32 (`CabinetWClass` + `Shell.Application`)**: Cuando el modo reemplazo está activo, al abrir cualquier carpeta desde tu **Escritorio de Windows**, presionar `Win + E` o hacer clic en el icono del Explorador de la barra de tareas, NexusFM captura la ruta solicitada, cierra la ventana clásica de Windows en milisegundos y abre la carpeta directamente en NexusFM.
 * **Regreso instantáneo a Windows**: Desde el panel lateral **`⚙ Personalizar`**, puedes desactivar el reemplazo o hacer clic en **`Regresar a Windows Explorer y Salir`** para restaurar `explorer.exe` inmediatamente en cualquier momento.
 
-### 2. 🎨 Panel Lateral de Personalización Integrado y Geometría Vectorial
+### 2. Panel Lateral de Personalización Integrado y Geometría Vectorial
 * **Sin barras de título ni scrollbars clásicos de Windows**: Ventana `WindowStyle.None` con barra superior propia, iconos vectoriales SVG (`Path` geometry) y barras de desplazamiento oscuras ultradelgadas de `6px`.
 * **4 Modelos Visuales de Carpetas**:
   * **Breeze Flat**: Carpetas geométricas planas de dos tonos con pestaña angulada y pestañas superiores conectadas directamente al marco del lienzo oscuro (`#0F1318`).
@@ -34,14 +34,14 @@ NexusFM se compila en **1 segundo** utilizando el motor nativo de C# / WPF inclu
 * **6 Temas de Profundidad + 10 Colores de Carpeta Personalizables**:
   * *Deep Breeze Blue*, *Nexus Emerald*, *Catppuccin Mocha*, *Cyberpunk Matrix*, *Crimson Obsidian* y *Royal Gold*, además de selector circular de color de carpetas en tiempo real.
 
-### 3. 📊 Analizador Visual de Espacio en Disco (`F9`)
+### 3.  Analizador Visual de Espacio en Disco (`F9`)
 * Escanea al instante la carpeta activa y sus subdirectorios, generando un gráfico de barras proporcionales con el porcentaje y peso exacto de cada carpeta y archivo para detectar qué consume espacio en tu disco.
 
 ### 4. ✎ Nexus Studio Editor Integrado (`Ctrl + E`) y Verificador SHA-256
 * **Editor de Código y Notas in-situ**: Selecciona cualquier archivo de código o texto (`.cs`, `.rs`, `.py`, `.js`, `.json`, `.md`, `.txt`, `.bat`, `.ini`) y presiona `Ctrl + E` (o clic derecho → *Editar en Nexus Studio Editor*) para modificarlo y guardarlo con `Ctrl + S` sin salir del explorador.
 * **Verificador Criptográfico SHA-256**: En el panel inspector (`F11`) o mediante clic derecho puedes calcular y copiar al portapapeles el hash `SHA-256` de cualquier ejecutable, ISO o archivo en un clic.
 
-### 5. 🔍 Filtrado Inteligente "Buscar por Tipo" y Ubicaciones Recientes
+### 5. Filtrado Inteligente "Buscar por Tipo" y Ubicaciones Recientes
 * En la barra lateral izquierda puedes filtrar instantáneamente cualquier directorio por categoría: **Documentos**, **Imágenes**, **Audio**, **Videos** o **Código fuente**, además de consultar tu historial de **Ubicaciones recientes**.
 
 ### 6. ◫ Doble Panel (`F3`), Pestañas Conectadas (`Ctrl+T`) y Terminal Sincronizada (`F4`)
@@ -50,7 +50,7 @@ NexusFM se compila en **1 segundo** utilizando el motor nativo de C# / WPF inclu
 
 ---
 
-## ⌨️ Mapa Completo de Atajos de Teclado
+## Mapa Completo de Atajos de Teclado
 
 | Atajo | Acción |
 | :--- | :--- |
@@ -78,7 +78,7 @@ NexusFM se compila en **1 segundo** utilizando el motor nativo de C# / WPF inclu
 
 ---
 
-## 🏗️ Arquitectura del Repositorio
+## Arquitectura del Repositorio
 
 ```text
 nexus-fm/
@@ -98,6 +98,6 @@ nexus-fm/
 
 ---
 
-## 📄 Licencia
+## Licencia
 
 Distribuido bajo la licencia **MIT**. Consulta el archivo `LICENSE` para más información.
