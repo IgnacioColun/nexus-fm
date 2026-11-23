@@ -41,10 +41,18 @@ NexusFM se compila en **1 segundo** utilizando el motor nativo de C# / WPF inclu
 * **Editor de Código y Notas in-situ**: Selecciona cualquier archivo de código o texto (`.cs`, `.rs`, `.py`, `.js`, `.json`, `.md`, `.txt`, `.bat`, `.ini`) y presiona `Ctrl + E` (o clic derecho → *Editar en Nexus Studio Editor*) para modificarlo y guardarlo con `Ctrl + S` sin salir del explorador.
 * **Verificador Criptográfico SHA-256**: En el panel inspector (`F11`) o mediante clic derecho puedes calcular y copiar al portapapeles el hash `SHA-256` de cualquier ejecutable, ISO o archivo en un clic.
 
-### 5. Filtrado Inteligente "Buscar por Tipo" y Ubicaciones Recientes
+### 5. Descripciones de Carpetas (`F10`) y Resumen de lo que Lleva Adentro
+* **Descripciones visuales en todas las vistas**: Cada carpeta muestra directamente una descripción personalizada de lo que contiene adentro (o un resumen automático de cuántas carpetas y archivos lleva) tanto en la **Vista Tarjetas Pro**, **Vista Iconos Breeze / Neón**, **Vista Lista de Detalles**, **Barra Superior de la Carpeta Actual**, **Inspector Lateral (`F11`)** y en el **Tooltip de Windows Explorer (`desktop.ini` `InfoTip`)**.
+* **Auto-descripción inteligente en 1 clic (`✨ Auto-describir contenido`)**: Presiona `F10` o haz clic en el botón **`+ Nota` / `✎ Nota`** de cualquier carpeta para escribir tu descripción o generarla automáticamente a partir de los archivos y subcarpetas que contiene.
+
+### 6. Motor Inmutable de Iconos y Sincronización al Iniciar Windows (`--startup`)
+* **Almacenamiento local inmutable (`%LOCALAPPDATA%\NexusFM\assets`)**: Los iconos multi-resolución (`256px`, `64px`, `48px`, `32px`, `16px`) de carpetas, juegos y softwares se almacenan localmente fuera de OneDrive para que nunca se rompan al mover carpetas ni al arrancar Windows.
+* **Sincronización automática en 3 oleadas al iniciar Windows**: Registrado en `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (`NexusFM.exe --startup`), actualiza y repara automáticamente todos los iconos y la caché del Shell (`SHChangeNotify` + `ie4uinit.exe -show`) al iniciar sesión.
+
+### 7. Filtrado Inteligente "Buscar por Tipo" y Ubicaciones Recientes
 * En la barra lateral izquierda puedes filtrar instantáneamente cualquier directorio por categoría: **Documentos**, **Imágenes**, **Audio**, **Videos** o **Código fuente**, además de consultar tu historial de **Ubicaciones recientes**.
 
-### 6. Doble Panel (`F3`), Pestañas Conectadas (`Ctrl+T`) y Terminal Sincronizada (`F4`)
+### 8. Doble Panel (`F3`), Pestañas Conectadas (`Ctrl+T`) y Terminal Sincronizada (`F4`)
 * Divide la pantalla en dos paneles independientes con `F3`, alterna entre ellos con `Tab`, copia de un panel al otro con `F5` o mueve con `F6`.
 * La terminal integrada (`F4`) ejecuta comandos reales de PowerShell en la carpeta activa; si ejecutas `cd <carpeta>`, el panel visual cambia a ese directorio automáticamente.
 
@@ -74,7 +82,10 @@ NexusFM se compila en **1 segundo** utilizando el motor nativo de C# / WPF inclu
 | `F7` | Crear nueva carpeta |
 | `F8` / `Supr` | Eliminar elementos seleccionados |
 | `F9` | Abrir **Analizador Visual de Espacio en Disco** |
+| `F10` | **Colocar / Editar Descripción de la Carpeta** (o auto-describir su contenido) |
 | `F11` | Mostrar / Ocultar **Inspector Lateral y Hash SHA-256** |
+| `Ctrl + M` o `M` | Abrir **Buscador Rápido para Mover / Enviar a otra carpeta** |
+| `Shift + Flechas` o `G` | **Agarrar y arrastrar carpeta con el teclado** |
 
 ---
 

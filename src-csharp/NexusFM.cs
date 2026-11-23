@@ -28,10 +28,13 @@ namespace NexusFM
     // ========================================================================
     public static class NativeWin32
     {
-        public const int SHCNE_ASSOCCHANGED = 0x08000000;
+        public const int SHCNE_ATTRIBUTES = 0x00000800;
         public const int SHCNE_UPDATEDIR = 0x00001000;
+        public const int SHCNE_UPDATEITEM = 0x00002000;
+        public const int SHCNE_ASSOCCHANGED = 0x08000000;
         public const uint SHCNF_IDLIST = 0x0000;
         public const uint SHCNF_PATHW = 0x0005;
+        public const uint SHCNF_FLUSH = 0x1000;
         public const uint SHCNF_FLUSHNOWAIT = 0x2000;
 
         public const uint WM_CLOSE = 0x0010;
@@ -48,6 +51,7 @@ namespace NexusFM
 
         public const uint FCS_READ = 0x00000001;
         public const uint FCS_FORCEWRITE = 0x00000002;
+        public const uint FCSM_INFOTIP = 0x00000004;
         public const uint FCSM_ICONFILE = 0x00000010;
 
         public const uint SHGFI_ICON = 0x000000100;
@@ -62,7 +66,7 @@ namespace NexusFM
             public int Bottom;
         }
 
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         public struct SHFOLDERCUSTOMSETTINGS
         {
             public uint dwSize;
@@ -102,7 +106,7 @@ namespace NexusFM
         [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHChangeNotify")]
         public static extern void SHChangeNotifyPath(int wEventId, uint uFlags, string dwItem1, IntPtr dwItem2);
 
-        [DllImport("shell32.dll", CharSet = CharSet.Auto)]
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
         public static extern int SHGetSetFolderCustomSettings(ref SHFOLDERCUSTOMSETTINGS pfcs, string pszPath, uint dwReadWrite);
 
         [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHGetFileInfoW")]
@@ -257,16 +261,329 @@ namespace NexusFM
             return fallbackEdit;
         }
 
-        public static void RefreshShell()
+        public static void NotifyFolderIconChanged(string folderPath)
+        {
+            if (string.IsNullOrEmpty(folderPath)) return;
+            try
+            {
+                SHChangeNotifyPath(SHCNE_ATTRIBUTES, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, folderPath, IntPtr.Zero);
+                SHChangeNotifyPath(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, folderPath, IntPtr.Zero);
+                SHChangeNotifyPath(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, folderPath, IntPtr.Zero);
+                var parent = Directory.GetParent(folderPath);
+                if (parent != null && Directory.Exists(parent.FullName))
+                {
+                    SHChangeNotifyPath(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, parent.FullName, IntPtr.Zero);
+                }
+            }
+            catch { }
+        }
+
+        private static DateTime _lastIe4uinitRun = DateTime.MinValue;
+
+        public static void RefreshShell(bool triggerIconCacheReload = false)
         {
             try
             {
                 SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST | SHCNF_FLUSHNOWAIT, IntPtr.Zero, IntPtr.Zero);
                 string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
                 if (Directory.Exists(desktop))
+                {
                     SHChangeNotifyPath(SHCNE_UPDATEDIR, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, desktop, IntPtr.Zero);
+                    SHChangeNotifyPath(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, desktop, IntPtr.Zero);
+                }
+
+                if (triggerIconCacheReload && (DateTime.Now - _lastIe4uinitRun).TotalSeconds > 2.5)
+                {
+                    _lastIe4uinitRun = DateTime.Now;
+                    Task.Run(() =>
+                    {
+                        try
+                        {
+                            string sysDir = Environment.GetFolderPath(Environment.SpecialFolder.System);
+                            string ie4Path = System.IO.Path.Combine(sysDir, "ie4uinit.exe");
+                            if (File.Exists(ie4Path))
+                            {
+                                var psi = new ProcessStartInfo(ie4Path, "-show")
+                                {
+                                    CreateNoWindow = true,
+                                    UseShellExecute = false,
+                                    WindowStyle = ProcessWindowStyle.Hidden
+                                };
+                                using (var p = Process.Start(psi))
+                                {
+                                    if (p != null) p.WaitForExit(3000);
+                                }
+                            }
+                        }
+                        catch { }
+                    });
+                }
             }
             catch { }
+        }
+    }
+
+    // ========================================================================
+    // 1A. GESTOR DE DESCRIPCIONES DE CARPETAS Y RESUMEN AUTOMÁTICO DE CONTENIDO
+    // ========================================================================
+    public static class FolderDescriptionManager
+    {
+        private static readonly object _descLock = new object();
+        private static readonly Dictionary<string, string> _descriptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static bool _loaded = false;
+
+        public static string NormalizePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return "";
+            try
+            {
+                return System.IO.Path.GetFullPath(path).TrimEnd('\\');
+            }
+            catch
+            {
+                return path.Trim().TrimEnd('\\');
+            }
+        }
+
+        private static string GetLocalAppDataDescriptionsPath()
+        {
+            string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NexusFM");
+            Directory.CreateDirectory(dir);
+            return System.IO.Path.Combine(dir, "folder-descriptions.ini");
+        }
+
+        private static string GetRepoDescriptionsPath()
+        {
+            string exeDir = System.IO.Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName);
+            return System.IO.Path.Combine(exeDir, "nexus-descriptions.ini");
+        }
+
+        public static void EnsureLoaded()
+        {
+            lock (_descLock)
+            {
+                if (_loaded) return;
+                _loaded = true;
+                LoadFromFile(GetLocalAppDataDescriptionsPath());
+                LoadFromFile(GetRepoDescriptionsPath());
+            }
+        }
+
+        private static void LoadFromFile(string filePath)
+        {
+            try
+            {
+                if (!File.Exists(filePath)) return;
+                foreach (var line in File.ReadAllLines(filePath, Encoding.UTF8))
+                {
+                    if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#") || line.StartsWith(";")) continue;
+                    int sep = line.IndexOf('|');
+                    if (sep <= 0) continue;
+                    string path = NormalizePath(line.Substring(0, sep));
+                    string desc = line.Substring(sep + 1).Replace("\\n", " ").Trim();
+                    if (!string.IsNullOrEmpty(path) && !string.IsNullOrEmpty(desc))
+                    {
+                        _descriptions[path] = desc;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static void SaveAll()
+        {
+            lock (_descLock)
+            {
+                try
+                {
+                    var sb = new StringBuilder();
+                    foreach (var kv in _descriptions.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+                    {
+                        if (string.IsNullOrWhiteSpace(kv.Value)) continue;
+                        string cleanVal = kv.Value.Replace("\r", " ").Replace("\n", " ").Trim();
+                        sb.AppendLine(kv.Key + "|" + cleanVal);
+                    }
+                    string content = sb.ToString();
+                    try { File.WriteAllText(GetLocalAppDataDescriptionsPath(), content, Encoding.UTF8); } catch { }
+                    try { File.WriteAllText(GetRepoDescriptionsPath(), content, Encoding.UTF8); } catch { }
+                }
+                catch { }
+            }
+        }
+
+        public static string GetDescription(string folderPath)
+        {
+            if (string.IsNullOrWhiteSpace(folderPath)) return "";
+            EnsureLoaded();
+            string norm = NormalizePath(folderPath);
+
+            lock (_descLock)
+            {
+                string cached;
+                if (_descriptions.TryGetValue(norm, out cached))
+                    return cached;
+            }
+
+            // Intentar leer desde desktop.ini dentro de la carpeta (por si la carpeta fue movida o renombrada)
+            try
+            {
+                string iniPath = System.IO.Path.Combine(folderPath, "desktop.ini");
+                if (File.Exists(iniPath))
+                {
+                    string foundDesc = null;
+                    foreach (var rawLine in File.ReadAllLines(iniPath))
+                    {
+                        string line = rawLine.Trim();
+                        if (line.StartsWith(";NexusDescription=", StringComparison.OrdinalIgnoreCase))
+                        {
+                            foundDesc = line.Substring(";NexusDescription=".Length).Trim();
+                            break;
+                        }
+                        if (line.StartsWith("InfoTip=", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string tip = line.Substring("InfoTip=".Length).Trim();
+                            if (!tip.StartsWith("@", StringComparison.OrdinalIgnoreCase))
+                                foundDesc = tip;
+                        }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(foundDesc))
+                    {
+                        lock (_descLock)
+                        {
+                            _descriptions[norm] = foundDesc;
+                        }
+                        return foundDesc;
+                    }
+                }
+            }
+            catch { }
+
+            return "";
+        }
+
+        public static void SetDescription(string folderPath, string description, string currentIcoPath, bool replaceExplorerActive)
+        {
+            if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath)) return;
+            EnsureLoaded();
+            string norm = NormalizePath(folderPath);
+            string clean = (description ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+
+            lock (_descLock)
+            {
+                if (string.IsNullOrEmpty(clean))
+                    _descriptions.Remove(norm);
+                else
+                    _descriptions[norm] = clean;
+            }
+
+            SaveAll();
+
+            // Sincronizar también en el desktop.ini de la carpeta para que viaje con ella y se vea en Windows
+            try
+            {
+                IconExtractor.ApplyFolderCustomIcon(folderPath, currentIcoPath, replaceExplorerActive, clean);
+            }
+            catch { }
+        }
+
+        public static void MigrateDescriptionPath(string oldPath, string newPath)
+        {
+            if (string.IsNullOrWhiteSpace(oldPath) || string.IsNullOrWhiteSpace(newPath)) return;
+            EnsureLoaded();
+            string oldNorm = NormalizePath(oldPath);
+            string newNorm = NormalizePath(newPath);
+            bool changed = false;
+
+            lock (_descLock)
+            {
+                string desc;
+                if (_descriptions.TryGetValue(oldNorm, out desc))
+                {
+                    _descriptions.Remove(oldNorm);
+                    _descriptions[newNorm] = desc;
+                    changed = true;
+                }
+            }
+            if (changed) SaveAll();
+        }
+
+        public static string GetQuickContentSummary(string folderPath)
+        {
+            if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath)) return "Carpeta";
+            try
+            {
+                var di = new DirectoryInfo(folderPath);
+                int subDirs = 0;
+                int files = 0;
+                foreach (var d in di.GetDirectories())
+                {
+                    if ((d.Attributes & FileAttributes.Hidden) == 0 && (d.Attributes & FileAttributes.System) == 0)
+                        subDirs++;
+                }
+                foreach (var f in di.GetFiles())
+                {
+                    if ((f.Attributes & FileAttributes.Hidden) == 0 && (f.Attributes & FileAttributes.System) == 0)
+                        files++;
+                }
+
+                if (subDirs == 0 && files == 0) return "Carpeta vacía";
+                if (subDirs > 0 && files > 0)
+                    return string.Format("{0} {1}, {2} {3}", subDirs, subDirs == 1 ? "carpeta" : "carpetas", files, files == 1 ? "archivo" : "archivos");
+                if (subDirs > 0)
+                    return string.Format("{0} {1} adentro", subDirs, subDirs == 1 ? "subcarpeta" : "subcarpetas");
+                return string.Format("{0} {1} adentro", files, files == 1 ? "archivo" : "archivos");
+            }
+            catch
+            {
+                return "Carpeta";
+            }
+        }
+
+        public static string GenerateSmartAutoDescription(string folderPath)
+        {
+            if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath))
+                return "";
+
+            try
+            {
+                var di = new DirectoryInfo(folderPath);
+                var subDirs = di.GetDirectories()
+                    .Where(d => (d.Attributes & FileAttributes.Hidden) == 0 && (d.Attributes & FileAttributes.System) == 0 && !d.Name.StartsWith("."))
+                    .Select(d => d.Name)
+                    .ToList();
+
+                var files = di.GetFiles()
+                    .Where(f => (f.Attributes & FileAttributes.Hidden) == 0 && (f.Attributes & FileAttributes.System) == 0 &&
+                                !string.Equals(f.Name, "desktop.ini", StringComparison.OrdinalIgnoreCase) && !f.Name.StartsWith("."))
+                    .ToList();
+
+                if (subDirs.Count == 0 && files.Count == 0)
+                    return "Carpeta vacía lista para organizar archivos.";
+
+                var sampleNames = new List<string>();
+                foreach (var sd in subDirs.Take(3))
+                    sampleNames.Add(sd);
+                foreach (var f in files.Take(4 - Math.Min(3, sampleNames.Count)))
+                {
+                    string cleanName = (f.Name.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase) || f.Name.EndsWith(".url", StringComparison.OrdinalIgnoreCase))
+                        ? f.Name.Substring(0, f.Name.Length - 4)
+                        : f.Name;
+                    sampleNames.Add(cleanName);
+                }
+
+                string examples = sampleNames.Count > 0 ? " (" + string.Join(", ", sampleNames) + (subDirs.Count + files.Count > sampleNames.Count ? "..." : "") + ")" : "";
+
+                if (subDirs.Count > 0 && files.Count > 0)
+                    return string.Format("Lleva {0} carpeta(s) y {1} archivo(s){2}", subDirs.Count, files.Count, examples);
+                if (subDirs.Count > 0)
+                    return string.Format("Lleva {0} subcarpeta(s){1}", subDirs.Count, examples);
+                return string.Format("Lleva {0} archivo(s){1}", files.Count, examples);
+            }
+            catch
+            {
+                return "Carpeta de archivos y proyectos.";
+            }
         }
     }
 
@@ -275,24 +592,61 @@ namespace NexusFM
     // ========================================================================
     public static class IconExtractor
     {
+        private static readonly object _cacheLock = new object();
         private static readonly Dictionary<string, ImageSource> _iconCache = new Dictionary<string, ImageSource>(StringComparer.OrdinalIgnoreCase);
 
         public static void ClearCache()
         {
-            _iconCache.Clear();
+            lock (_cacheLock)
+            {
+                _iconCache.Clear();
+            }
         }
 
-        // Escanea y repara proactivamente los iconos de juegos y softwares (.url / .lnk) en el Escritorio y subcarpetas
-        public static void PrecompileAndRepairDesktopAppIcons()
+        // Directorio local inmutable en %LOCALAPPDATA%\NexusFM\assets para que los iconos NUNCA se rompan
+        // al iniciar Windows (incluso antes de que cargue OneDrive) ni al mover la carpeta del proyecto
+        public static string GetStableAssetsDir()
+        {
+            string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NexusFM", "assets");
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+
+        public static string GetStableAppIconsDir()
+        {
+            string dir = System.IO.Path.Combine(GetStableAssetsDir(), "app-icons");
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+
+        // Escanea, repara y sincroniza todos los iconos de carpetas y accesos (.url / .lnk) en el Escritorio y ubicaciones del usuario
+        public static void PrecompileAndRepairDesktopAppIcons(string activeFolderIcoPath = null, bool applyDesktopFolderIcons = true, IEnumerable<string> extraDirs = null)
         {
             try
             {
+                if (!string.IsNullOrEmpty(activeFolderIcoPath) && File.Exists(activeFolderIcoPath))
+                {
+                    ApplyNexusIconToDesktopFolders(activeFolderIcoPath, applyDesktopFolderIcons, extraDirs);
+                }
+
                 string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                if (!Directory.Exists(desktop)) return;
-                ScanAndRepairShortcutsInDir(desktop, 3);
-                NativeWin32.RefreshShell();
+                if (Directory.Exists(desktop))
+                {
+                    ScanAndRepairShortcutsInDir(desktop, 4);
+                }
+
+                NativeWin32.RefreshShell(true);
             }
             catch { }
+        }
+
+        private static bool ShouldSkipDirectoryName(string name)
+        {
+            if (string.IsNullOrEmpty(name) || name.StartsWith(".")) return true;
+            return string.Equals(name, "node_modules", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(name, "bin", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(name, "obj", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(name, "target", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void ScanAndRepairShortcutsInDir(string dirPath, int depth)
@@ -312,8 +666,17 @@ namespace NexusFM
                             IsDirectory = false,
                             Extension = ext
                         };
-                        if (ext == "URL") ResolveAndExtractUrlShortcutIcon(f, dummy.DisplayName);
-                        else ResolveAndExtractLnkShortcutIcon(f, dummy.DisplayName);
+                        ImageSource extracted = (ext == "URL")
+                            ? ResolveAndExtractUrlShortcutIcon(f, dummy.DisplayName)
+                            : ResolveAndExtractLnkShortcutIcon(f, dummy.DisplayName);
+
+                        if (extracted != null)
+                        {
+                            lock (_cacheLock)
+                            {
+                                _iconCache[f] = extracted;
+                            }
+                        }
                     }
                 }
                 if (depth > 0)
@@ -321,7 +684,7 @@ namespace NexusFM
                     foreach (var sub in Directory.GetDirectories(dirPath))
                     {
                         string name = System.IO.Path.GetFileName(sub);
-                        if (name.StartsWith(".") || string.Equals(name, "node_modules", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (ShouldSkipDirectoryName(name)) continue;
                         ScanAndRepairShortcutsInDir(sub, depth - 1);
                     }
                 }
@@ -329,16 +692,18 @@ namespace NexusFM
             catch { }
         }
 
-        // Genera un archivo .ico multi-resolución (256, 64, 48, 32, 16) con el color actual de NexusFM
-        public static string GenerateMultiSizeFolderIco(string baseAssetsDir, string accentHex)
+        // Genera un archivo .ico multi-resolución (256, 64, 48, 32, 16) tanto en %LOCALAPPDATA%\NexusFM\assets como en el repo
+        public static string GenerateMultiSizeFolderIco(string repoAssetsDir, string accentHex)
         {
+            string stableDir = GetStableAssetsDir();
             try
             {
-                Directory.CreateDirectory(baseAssetsDir);
+                if (!string.IsNullOrEmpty(repoAssetsDir)) Directory.CreateDirectory(repoAssetsDir);
                 if (string.IsNullOrWhiteSpace(accentHex)) accentHex = "#4DA2DB";
                 string cleanHex = accentHex.TrimStart('#').ToUpperInvariant();
-                string mainIcoPath = System.IO.Path.Combine(baseAssetsDir, "nexus-folder.ico");
-                string themedIcoPath = System.IO.Path.Combine(baseAssetsDir, "nexus-folder-" + cleanHex + ".ico");
+
+                string stableMainIco = System.IO.Path.Combine(stableDir, "nexus-folder.ico");
+                string stableThemedIco = System.IO.Path.Combine(stableDir, "nexus-folder-" + cleanHex + ".ico");
 
                 System.Drawing.Color mainColor = System.Drawing.ColorTranslator.FromHtml(accentHex);
                 System.Drawing.Color darkColor = System.Drawing.Color.FromArgb(255,
@@ -363,13 +728,24 @@ namespace NexusFM
                     }
                 }
 
-                SaveMultiFrameIco(sizes, pngFrames, mainIcoPath);
-                SaveMultiFrameIco(sizes, pngFrames, themedIcoPath);
-                return themedIcoPath;
+                SaveMultiFrameIco(sizes, pngFrames, stableMainIco);
+                SaveMultiFrameIco(sizes, pngFrames, stableThemedIco);
+
+                if (!string.IsNullOrEmpty(repoAssetsDir))
+                {
+                    try
+                    {
+                        SaveMultiFrameIco(sizes, pngFrames, System.IO.Path.Combine(repoAssetsDir, "nexus-folder.ico"));
+                        SaveMultiFrameIco(sizes, pngFrames, System.IO.Path.Combine(repoAssetsDir, "nexus-folder-" + cleanHex + ".ico"));
+                    }
+                    catch { }
+                }
+
+                return stableThemedIco;
             }
             catch
             {
-                return System.IO.Path.Combine(baseAssetsDir, "nexus-folder.ico");
+                return System.IO.Path.Combine(stableDir, "nexus-folder.ico");
             }
         }
 
@@ -484,163 +860,223 @@ namespace NexusFM
             }
         }
 
-        // Aplica o restaura el icono de carpeta de NexusFM a todas las carpetas del Escritorio de Windows
-        public static void ApplyNexusIconToDesktopFolders(string icoPath, bool enable)
+        // Aplica o restaura el icono de carpeta de NexusFM a todas las carpetas del Escritorio de Windows (hasta 4 niveles)
+        public static void ApplyNexusIconToDesktopFolders(string icoPath, bool enable, IEnumerable<string> extraFolders = null)
         {
             try
             {
+                var dirsToUpdate = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                if (!Directory.Exists(desktop)) return;
-
-                var dirsToUpdate = new List<string>();
-                foreach (var d in Directory.GetDirectories(desktop))
+                if (Directory.Exists(desktop))
                 {
-                    dirsToUpdate.Add(d);
+                    CollectDirectoriesRecursive(desktop, 4, dirsToUpdate);
+                }
+
+                if (extraFolders != null)
+                {
+                    foreach (var ef in extraFolders)
+                    {
+                        if (!string.IsNullOrWhiteSpace(ef) && Directory.Exists(ef))
+                        {
+                            dirsToUpdate.Add(ef);
+                            CollectDirectoriesRecursive(ef, 2, dirsToUpdate);
+                        }
+                    }
+                }
+
+                string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                foreach (var folderPath in dirsToUpdate)
+                {
+                    if (string.Equals(folderPath.TrimEnd('\\'), desktop.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(folderPath.TrimEnd('\\'), userProfile.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    ApplyFolderCustomIcon(folderPath, icoPath, enable, null);
+                }
+
+                NativeWin32.RefreshShell(true);
+            }
+            catch { }
+        }
+
+        private static void CollectDirectoriesRecursive(string rootDir, int depth, HashSet<string> result)
+        {
+            if (depth <= 0 || string.IsNullOrEmpty(rootDir) || !Directory.Exists(rootDir)) return;
+            try
+            {
+                foreach (var d in Directory.GetDirectories(rootDir))
+                {
+                    string name = System.IO.Path.GetFileName(d);
+                    if (ShouldSkipDirectoryName(name)) continue;
+                    result.Add(d);
+                    if (depth > 1)
+                    {
+                        CollectDirectoriesRecursive(d, depth - 1, result);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static void ApplyFolderCustomIcon(string folderPath, string icoPath, bool enable, string overrideDescription = null)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath)) return;
+                string iniPath = System.IO.Path.Combine(folderPath, "desktop.ini");
+
+                string backupIcon = null;
+                string existingDesc = null;
+                bool isNexusIni = false;
+
+                if (File.Exists(iniPath))
+                {
                     try
                     {
-                        foreach (var sub in Directory.GetDirectories(d))
-                            dirsToUpdate.Add(sub);
+                        File.SetAttributes(iniPath, FileAttributes.Normal);
+                        foreach (var rawLine in File.ReadAllLines(iniPath))
+                        {
+                            string line = rawLine.Trim();
+                            if (line.IndexOf("nexus-folder", StringComparison.OrdinalIgnoreCase) >= 0)
+                                isNexusIni = true;
+
+                            if (line.StartsWith("IconResource=", StringComparison.OrdinalIgnoreCase) &&
+                                line.IndexOf("nexus-folder", StringComparison.OrdinalIgnoreCase) < 0)
+                            {
+                                backupIcon = line.Substring("IconResource=".Length).Trim();
+                            }
+                            else if (line.StartsWith(";NexusBackupIcon=", StringComparison.OrdinalIgnoreCase))
+                            {
+                                backupIcon = line.Substring(";NexusBackupIcon=".Length).Trim();
+                            }
+                            else if (line.StartsWith(";NexusDescription=", StringComparison.OrdinalIgnoreCase))
+                            {
+                                existingDesc = line.Substring(";NexusDescription=".Length).Trim();
+                            }
+                            else if (line.StartsWith("InfoTip=", StringComparison.OrdinalIgnoreCase) && string.IsNullOrEmpty(existingDesc))
+                            {
+                                string tip = line.Substring("InfoTip=".Length).Trim();
+                                if (!tip.StartsWith("@", StringComparison.OrdinalIgnoreCase))
+                                    existingDesc = tip;
+                            }
+                        }
                     }
                     catch { }
                 }
 
-                foreach (var folderPath in dirsToUpdate)
+                string folderDesc = (overrideDescription != null)
+                    ? overrideDescription
+                    : (!string.IsNullOrEmpty(existingDesc) ? existingDesc : FolderDescriptionManager.GetDescription(folderPath));
+
+                if (enable && !string.IsNullOrEmpty(icoPath) && File.Exists(icoPath))
                 {
-                    ApplyFolderCustomIcon(folderPath, icoPath, enable);
-                }
-
-                NativeWin32.RefreshShell();
-            }
-            catch { }
-        }
-
-        public static void ApplyFolderCustomIcon(string folderPath, string icoPath, bool enable)
-        {
-            try
-            {
-                if (!Directory.Exists(folderPath)) return;
-                string iniPath = System.IO.Path.Combine(folderPath, "desktop.ini");
-
-                if (enable)
-                {
-                    // Si ya existe desktop.ini con un icono que no es de NexusFM, respaldarlo
-                    string backupIcon = null;
-                    if (File.Exists(iniPath))
+                    var sb = new StringBuilder();
+                    sb.AppendLine("[.ShellClassInfo]");
+                    sb.AppendLine("IconResource=" + icoPath + ",0");
+                    sb.AppendLine("IconFile=" + icoPath);
+                    sb.AppendLine("IconIndex=0");
+                    if (!string.IsNullOrWhiteSpace(folderDesc))
                     {
-                        try
+                        sb.AppendLine("InfoTip=" + folderDesc);
+                        sb.AppendLine(";NexusDescription=" + folderDesc);
+                    }
+                    if (!string.IsNullOrWhiteSpace(backupIcon))
+                    {
+                        sb.AppendLine(";NexusBackupIcon=" + backupIcon);
+                    }
+                    sb.AppendLine("[ViewState]");
+                    sb.AppendLine("Mode=");
+                    sb.AppendLine("Vid=");
+                    sb.AppendLine("FolderType=Generic");
+
+                    try
+                    {
+                        if (File.Exists(iniPath))
                         {
                             File.SetAttributes(iniPath, FileAttributes.Normal);
-                            foreach (var line in File.ReadAllLines(iniPath))
-                            {
-                                if (line.StartsWith("IconResource=", StringComparison.OrdinalIgnoreCase) &&
-                                    line.IndexOf("nexus-folder", StringComparison.OrdinalIgnoreCase) < 0)
-                                {
-                                    backupIcon = line.Substring("IconResource=".Length).Trim();
-                                }
-                                else if (line.StartsWith(";NexusBackupIcon=", StringComparison.OrdinalIgnoreCase))
-                                {
-                                    backupIcon = line.Substring(";NexusBackupIcon=".Length).Trim();
-                                }
-                            }
                         }
-                        catch { }
+                        File.WriteAllText(iniPath, sb.ToString(), Encoding.Unicode);
+                        File.SetAttributes(iniPath, FileAttributes.Hidden | FileAttributes.System | FileAttributes.Archive);
                     }
+                    catch { }
 
-                    // 1. Llamar a la API oficial de Windows Shell SHGetSetFolderCustomSettings
-                    var fcs = new NativeWin32.SHFOLDERCUSTOMSETTINGS
+                    try
                     {
-                        dwSize = (uint)Marshal.SizeOf(typeof(NativeWin32.SHFOLDERCUSTOMSETTINGS)),
-                        dwMask = NativeWin32.FCSM_ICONFILE,
-                        pszIconFile = icoPath,
-                        cchIconFile = 0,
-                        iIconIndex = 0
-                    };
-                    NativeWin32.SHGetSetFolderCustomSettings(ref fcs, folderPath, NativeWin32.FCS_FORCEWRITE);
-
-                    // 2. Asegurar contenido limpio de desktop.ini con respaldo si existía
-                    if (!string.IsNullOrEmpty(backupIcon) && File.Exists(iniPath))
-                    {
-                        try
-                        {
-                            File.SetAttributes(iniPath, FileAttributes.Normal);
-                            string content = File.ReadAllText(iniPath);
-                            if (content.IndexOf(";NexusBackupIcon=", StringComparison.OrdinalIgnoreCase) < 0)
-                            {
-                                content = content.TrimEnd() + Environment.NewLine + ";NexusBackupIcon=" + backupIcon + Environment.NewLine;
-                                File.WriteAllText(iniPath, content, Encoding.Unicode);
-                            }
-                            File.SetAttributes(iniPath, FileAttributes.Hidden | FileAttributes.System | FileAttributes.Archive);
-                        }
-                        catch { }
+                        var dirInfo = new DirectoryInfo(folderPath);
+                        if ((dirInfo.Attributes & FileAttributes.ReadOnly) == 0)
+                            dirInfo.Attributes |= FileAttributes.ReadOnly;
                     }
+                    catch { }
 
-                    var dirInfo = new DirectoryInfo(folderPath);
-                    dirInfo.Attributes |= FileAttributes.ReadOnly;
-                    NativeWin32.SHChangeNotifyPath(NativeWin32.SHCNE_UPDATEDIR, NativeWin32.SHCNF_PATHW | NativeWin32.SHCNF_FLUSHNOWAIT, folderPath, IntPtr.Zero);
+                    NativeWin32.NotifyFolderIconChanged(folderPath);
                 }
                 else
                 {
-                    if (!File.Exists(iniPath)) return;
-                    File.SetAttributes(iniPath, FileAttributes.Normal);
-                    string[] lines = File.ReadAllLines(iniPath);
-                    string backupIcon = null;
-                    bool isNexusIni = false;
-                    foreach (var line in lines)
-                    {
-                        if (line.IndexOf("nexus-folder", StringComparison.OrdinalIgnoreCase) >= 0)
-                            isNexusIni = true;
-                        if (line.StartsWith(";NexusBackupIcon=", StringComparison.OrdinalIgnoreCase))
-                            backupIcon = line.Substring(";NexusBackupIcon=".Length).Trim();
-                    }
+                    if (!File.Exists(iniPath) && string.IsNullOrWhiteSpace(folderDesc)) return;
 
-                    if (!isNexusIni)
+                    if (!isNexusIni && overrideDescription == null)
                     {
-                        File.SetAttributes(iniPath, FileAttributes.Hidden | FileAttributes.System | FileAttributes.Archive);
+                        if (File.Exists(iniPath))
+                            File.SetAttributes(iniPath, FileAttributes.Hidden | FileAttributes.System | FileAttributes.Archive);
                         return;
                     }
 
-                    if (!string.IsNullOrEmpty(backupIcon))
+                    if (!string.IsNullOrEmpty(backupIcon) || !string.IsNullOrWhiteSpace(folderDesc))
                     {
-                        string[] parts = backupIcon.Split(',');
-                        string bFile = parts[0].Trim();
-                        int parsed;
-                        int bIdx = (parts.Length > 1 && int.TryParse(parts[1].Trim(), out parsed)) ? parsed : 0;
-                        var fcs = new NativeWin32.SHFOLDERCUSTOMSETTINGS
+                        var sb = new StringBuilder();
+                        sb.AppendLine("[.ShellClassInfo]");
+                        if (!string.IsNullOrEmpty(backupIcon))
+                            sb.AppendLine("IconResource=" + backupIcon);
+                        if (!string.IsNullOrWhiteSpace(folderDesc))
                         {
-                            dwSize = (uint)Marshal.SizeOf(typeof(NativeWin32.SHFOLDERCUSTOMSETTINGS)),
-                            dwMask = NativeWin32.FCSM_ICONFILE,
-                            pszIconFile = bFile,
-                            cchIconFile = 0,
-                            iIconIndex = bIdx
-                        };
-                        NativeWin32.SHGetSetFolderCustomSettings(ref fcs, folderPath, NativeWin32.FCS_FORCEWRITE);
+                            sb.AppendLine("InfoTip=" + folderDesc);
+                            sb.AppendLine(";NexusDescription=" + folderDesc);
+                        }
+                        File.SetAttributes(iniPath, FileAttributes.Normal);
+                        File.WriteAllText(iniPath, sb.ToString(), Encoding.Unicode);
+                        File.SetAttributes(iniPath, FileAttributes.Hidden | FileAttributes.System | FileAttributes.Archive);
+                        var dirInfo = new DirectoryInfo(folderPath);
+                        dirInfo.Attributes |= FileAttributes.ReadOnly;
                     }
                     else
                     {
-                        File.Delete(iniPath);
+                        if (File.Exists(iniPath))
+                        {
+                            File.SetAttributes(iniPath, FileAttributes.Normal);
+                            File.Delete(iniPath);
+                        }
                         var dirInfo = new DirectoryInfo(folderPath);
                         dirInfo.Attributes &= ~FileAttributes.ReadOnly;
                     }
-                    NativeWin32.SHChangeNotifyPath(NativeWin32.SHCNE_UPDATEDIR, NativeWin32.SHCNF_PATHW | NativeWin32.SHCNF_FLUSHNOWAIT, folderPath, IntPtr.Zero);
+                    NativeWin32.NotifyFolderIconChanged(folderPath);
                 }
             }
             catch { }
         }
 
-        // Compila un icono .ico de alta resolución para juegos o softwares cuyos accesos directos estaban vacíos/rotos
+        // Compila un icono .ico de alta resolución en %LOCALAPPDATA%\NexusFM\assets\app-icons (inmutable) y en el repo
         public static string CompileCustomAppIcon(string appTitle, bool isGame)
         {
             try
             {
+                string stableOutDir = GetStableAppIconsDir();
                 string exeDir = System.IO.Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName);
-                string outDir = System.IO.Path.Combine(exeDir, "assets", "app-icons");
-                Directory.CreateDirectory(outDir);
+                string repoOutDir = System.IO.Path.Combine(exeDir, "assets", "app-icons");
+                try { Directory.CreateDirectory(repoOutDir); } catch { }
 
                 string safeName = new string(appTitle.Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_').ToArray());
                 if (string.IsNullOrEmpty(safeName)) safeName = "app";
-                string icoPath = System.IO.Path.Combine(outDir, safeName + ".ico");
+                string stableIcoPath = System.IO.Path.Combine(stableOutDir, safeName + ".ico");
+                string repoIcoPath = System.IO.Path.Combine(repoOutDir, safeName + ".ico");
 
-                if (File.Exists(icoPath)) return icoPath;
+                if (File.Exists(stableIcoPath))
+                {
+                    if (!File.Exists(repoIcoPath))
+                    {
+                        try { File.Copy(stableIcoPath, repoIcoPath, true); } catch { }
+                    }
+                    return stableIcoPath;
+                }
 
                 // Seleccionar paleta vibrante según el nombre del juego/software
                 string upper = appTitle.ToUpperInvariant();
@@ -695,8 +1131,9 @@ namespace NexusFM
                     }
                 }
 
-                SaveMultiFrameIco(sizes, frames, icoPath);
-                return icoPath;
+                SaveMultiFrameIco(sizes, frames, stableIcoPath);
+                try { SaveMultiFrameIco(sizes, frames, repoIcoPath); } catch { }
+                return stableIcoPath;
             }
             catch
             {
@@ -715,7 +1152,7 @@ namespace NexusFM
             return clean.Substring(0, Math.Min(2, clean.Length)).ToUpperInvariant();
         }
 
-        // Extrae o repara el icono real de cualquier juego (.url, .lnk, .exe) o software
+        // Extrae o repara el icono real de cualquier juego (.url, .lnk, .exe) o software (100% Thread-Safe)
         public static ImageSource GetFileIcon(FileItem item)
         {
             if (item == null || item.IsDirectory || string.IsNullOrEmpty(item.FullPath)) return null;
@@ -727,9 +1164,12 @@ namespace NexusFM
                 return null;
             }
 
-            ImageSource cached;
-            if (_iconCache.TryGetValue(item.FullPath, out cached))
-                return cached;
+            lock (_cacheLock)
+            {
+                ImageSource cached;
+                if (_iconCache.TryGetValue(item.FullPath, out cached))
+                    return cached;
+            }
 
             ImageSource result = null;
             try
@@ -758,9 +1198,22 @@ namespace NexusFM
             catch { }
 
             if (result != null)
-                _iconCache[item.FullPath] = result;
+            {
+                lock (_cacheLock)
+                {
+                    _iconCache[item.FullPath] = result;
+                }
+            }
 
             return result;
+        }
+
+        private static bool IsVolatileOneDriveAppIconPath(string iconPath)
+        {
+            if (string.IsNullOrEmpty(iconPath)) return false;
+            string stableDir = GetStableAppIconsDir();
+            if (iconPath.StartsWith(stableDir, StringComparison.OrdinalIgnoreCase)) return false;
+            return iconPath.IndexOf(@"\assets\app-icons\", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static ImageSource ResolveAndExtractUrlShortcutIcon(string urlFilePath, string displayName)
@@ -783,13 +1236,17 @@ namespace NexusFM
                         urlTarget = t.Substring(4).Trim();
                 }
 
-                if (!string.IsNullOrEmpty(iconFile) && !iconFile.StartsWith("http", StringComparison.OrdinalIgnoreCase) && File.Exists(iconFile))
+                // Si el icono no es una ruta volátil de carpeta movida y existe en disco, cargarlo directamente
+                if (!string.IsNullOrEmpty(iconFile) &&
+                    !iconFile.StartsWith("http", StringComparison.OrdinalIgnoreCase) &&
+                    !IsVolatileOneDriveAppIconPath(iconFile) &&
+                    File.Exists(iconFile))
                 {
                     var img = LoadBestIcoFrame(iconFile) ?? ExtractHighResFromFile(iconFile, iconIndex);
                     if (img != null) return img;
                 }
 
-                // El icono del juego o software (.url) no existe en disco o es una URL rota -> Compilar y reparar icono .ico
+                // El icono del juego o software (.url) no existe o apunta a una carpeta movida -> Compilar en %LOCALAPPDATA%\NexusFM\assets\app-icons
                 bool isGame = urlTarget.IndexOf("steam://", StringComparison.OrdinalIgnoreCase) >= 0 ||
                               urlTarget.IndexOf("epicgames", StringComparison.OrdinalIgnoreCase) >= 0 ||
                               urlFilePath.IndexOf("Games", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -797,31 +1254,34 @@ namespace NexusFM
                 string compiledIco = CompileCustomAppIcon(displayName, isGame);
                 if (!string.IsNullOrEmpty(compiledIco) && File.Exists(compiledIco))
                 {
-                    // Actualizar el archivo .url para que en el Escritorio de Windows tampoco se vea vacío
-                    try
+                    if (!string.Equals(iconFile, compiledIco, StringComparison.OrdinalIgnoreCase))
                     {
-                        var outLines = new List<string>();
-                        bool wroteIconFile = false;
-                        bool wroteIconIndex = false;
-                        foreach (var l in lines)
+                        try
                         {
-                            if (l.StartsWith("IconFile=", StringComparison.OrdinalIgnoreCase))
+                            var outLines = new List<string>();
+                            bool wroteIconFile = false;
+                            bool wroteIconIndex = false;
+                            foreach (var l in lines)
                             {
-                                outLines.Add("IconFile=" + compiledIco);
-                                wroteIconFile = true;
+                                if (l.StartsWith("IconFile=", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    outLines.Add("IconFile=" + compiledIco);
+                                    wroteIconFile = true;
+                                }
+                                else if (l.StartsWith("IconIndex=", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    outLines.Add("IconIndex=0");
+                                    wroteIconIndex = true;
+                                }
+                                else outLines.Add(l);
                             }
-                            else if (l.StartsWith("IconIndex=", StringComparison.OrdinalIgnoreCase))
-                            {
-                                outLines.Add("IconIndex=0");
-                                wroteIconIndex = true;
-                            }
-                            else outLines.Add(l);
+                            if (!wroteIconFile) outLines.Add("IconFile=" + compiledIco);
+                            if (!wroteIconIndex) outLines.Add("IconIndex=0");
+                            File.WriteAllLines(urlFilePath, outLines);
+                            NativeWin32.SHChangeNotifyPath(NativeWin32.SHCNE_UPDATEITEM, NativeWin32.SHCNF_PATHW | NativeWin32.SHCNF_FLUSHNOWAIT, urlFilePath, IntPtr.Zero);
                         }
-                        if (!wroteIconFile) outLines.Add("IconFile=" + compiledIco);
-                        if (!wroteIconIndex) outLines.Add("IconIndex=0");
-                        File.WriteAllLines(urlFilePath, outLines);
+                        catch { }
                     }
-                    catch { }
 
                     return LoadBestIcoFrame(compiledIco) ?? ExtractHighResFromFile(compiledIco, 0);
                 }
@@ -862,26 +1322,35 @@ namespace NexusFM
                             }
                         }
 
-                        // 1. Intentar extraer desde IconLocation explícito si existe en disco
-                        if (!string.IsNullOrEmpty(iconLoc) && File.Exists(iconLoc))
-                        {
-                            var img = ExtractHighResFromFile(iconLoc, iconIndex) ?? LoadBestIcoFrame(iconLoc);
-                            if (img != null) return img;
-                        }
+                        bool isVolatileAppIcon = IsVolatileOneDriveAppIconPath(iconLoc);
 
-                        // 2. Intentar extraer desde TargetPath si existe en disco
+                        // 1. Intentar extraer desde TargetPath real primero si existe en disco
                         if (!string.IsNullOrEmpty(targetPath))
                         {
                             targetPath = Environment.ExpandEnvironmentVariables(targetPath.Trim().Trim('"'));
                             if (File.Exists(targetPath))
                             {
+                                // Si antes tenía una ruta volátil o vacía, apuntar al icono real o extraerlo
+                                if (!string.IsNullOrEmpty(iconLoc) && !isVolatileAppIcon && File.Exists(iconLoc))
+                                {
+                                    var explicitImg = ExtractHighResFromFile(iconLoc, iconIndex) ?? LoadBestIcoFrame(iconLoc);
+                                    if (explicitImg != null) return explicitImg;
+                                }
+
                                 var img = ExtractHighResFromFile(targetPath, 0) ?? LoadBestIcoFrame(targetPath) ?? ExtractViaShellFileInfo(targetPath);
                                 if (img != null) return img;
                             }
                         }
 
-                        // 3. Si tanto IconLocation como TargetPath apuntan a archivos desinstalados/inexistentes -> Compilar y reparar icono .ico
-                        bool iconMissing = string.IsNullOrEmpty(iconLoc) || !File.Exists(iconLoc);
+                        // 2. Intentar extraer desde IconLocation explícito si existe y no es ruta volátil
+                        if (!string.IsNullOrEmpty(iconLoc) && !isVolatileAppIcon && File.Exists(iconLoc))
+                        {
+                            var img = ExtractHighResFromFile(iconLoc, iconIndex) ?? LoadBestIcoFrame(iconLoc);
+                            if (img != null) return img;
+                        }
+
+                        // 3. Si el icono falta o apuntaba a una carpeta movida -> Compilar en ruta estable %LOCALAPPDATA%\NexusFM\assets\app-icons
+                        bool iconMissing = string.IsNullOrEmpty(iconLoc) || !File.Exists(iconLoc) || isVolatileAppIcon;
                         bool targetMissing = string.IsNullOrEmpty(targetPath) || (!File.Exists(targetPath) && !Directory.Exists(targetPath));
 
                         if (iconMissing && targetMissing)
@@ -890,12 +1359,16 @@ namespace NexusFM
                             string compiledIco = CompileCustomAppIcon(displayName, isGame);
                             if (!string.IsNullOrEmpty(compiledIco) && File.Exists(compiledIco))
                             {
-                                try
+                                if (!string.Equals(iconLoc, compiledIco, StringComparison.OrdinalIgnoreCase))
                                 {
-                                    sc.GetType().InvokeMember("IconLocation", BindingFlags.SetProperty, null, sc, new object[] { compiledIco + ",0" });
-                                    sc.GetType().InvokeMember("Save", BindingFlags.InvokeMethod, null, sc, null);
+                                    try
+                                    {
+                                        sc.GetType().InvokeMember("IconLocation", BindingFlags.SetProperty, null, sc, new object[] { compiledIco + ",0" });
+                                        sc.GetType().InvokeMember("Save", BindingFlags.InvokeMethod, null, sc, null);
+                                        NativeWin32.SHChangeNotifyPath(NativeWin32.SHCNE_UPDATEITEM, NativeWin32.SHCNF_PATHW | NativeWin32.SHCNF_FLUSHNOWAIT, lnkFilePath, IntPtr.Zero);
+                                    }
+                                    catch { }
                                 }
-                                catch { }
 
                                 return LoadBestIcoFrame(compiledIco) ?? ExtractHighResFromFile(compiledIco, 0);
                             }
@@ -1051,6 +1524,7 @@ namespace NexusFM
     public class UserConfig
     {
         public bool ReplaceWindowsExplorer { get; set; }
+        public bool AutoStartWithWindows { get; set; }
         public string ThemeName { get; set; }
         public string CustomAccentHex { get; set; }
         public string FolderModel { get; set; } // "Breeze", "Neon", "Cards", "Details"
@@ -1062,6 +1536,7 @@ namespace NexusFM
         public UserConfig()
         {
             ReplaceWindowsExplorer = true;
+            AutoStartWithWindows = true;
             ThemeName = "Deep Breeze Blue";
             CustomAccentHex = "";
             FolderModel = "Breeze";
@@ -1074,6 +1549,13 @@ namespace NexusFM
         private static string GetConfigPath()
         {
             string dir = System.IO.Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName);
+            return System.IO.Path.Combine(dir, "nexus-config.ini");
+        }
+
+        private static string GetLocalBackupConfigPath()
+        {
+            string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NexusFM");
+            Directory.CreateDirectory(dir);
             return System.IO.Path.Combine(dir, "nexus-config.ini");
         }
 
@@ -1091,6 +1573,7 @@ namespace NexusFM
             {
                 var sb = new StringBuilder();
                 sb.AppendLine("ReplaceWindowsExplorer=" + ReplaceWindowsExplorer);
+                sb.AppendLine("AutoStartWithWindows=" + AutoStartWithWindows);
                 sb.AppendLine("ThemeName=" + ThemeName);
                 sb.AppendLine("CustomAccentHex=" + CustomAccentHex);
                 sb.AppendLine("FolderModel=" + FolderModel);
@@ -1098,7 +1581,9 @@ namespace NexusFM
                 sb.AppendLine("ShowSidebar=" + ShowSidebar);
                 sb.AppendLine("ShowPreview=" + ShowPreview);
                 sb.AppendLine("Recent=" + string.Join("|", RecentLocations));
-                File.WriteAllText(GetConfigPath(), sb.ToString(), Encoding.UTF8);
+                string txt = sb.ToString();
+                try { File.WriteAllText(GetConfigPath(), txt, Encoding.UTF8); } catch { }
+                try { File.WriteAllText(GetLocalBackupConfigPath(), txt, Encoding.UTF8); } catch { }
             }
             catch { }
         }
@@ -1109,6 +1594,7 @@ namespace NexusFM
             try
             {
                 string p = GetConfigPath();
+                if (!File.Exists(p)) p = GetLocalBackupConfigPath();
                 if (!File.Exists(p)) return cfg;
                 foreach (var line in File.ReadAllLines(p, Encoding.UTF8))
                 {
@@ -1117,6 +1603,7 @@ namespace NexusFM
                     string k = line.Substring(0, eq).Trim();
                     string v = line.Substring(eq + 1).Trim();
                     if (k == "ReplaceWindowsExplorer") cfg.ReplaceWindowsExplorer = bool.Parse(v);
+                    else if (k == "AutoStartWithWindows") cfg.AutoStartWithWindows = bool.Parse(v);
                     else if (k == "ThemeName") cfg.ThemeName = v;
                     else if (k == "CustomAccentHex") cfg.CustomAccentHex = v;
                     else if (k == "FolderModel") cfg.FolderModel = v;
@@ -1159,6 +1646,8 @@ namespace NexusFM
         public DateTime AccessedDate { get; set; }
         public string ModifiedText { get; set; }
         public string Category { get; set; } // "DOC", "IMG", "AUD", "VID", "CODE", "OTHER"
+        public string Description { get; set; } // Descripción personalizada de lo que lleva la carpeta adentro
+        public string ContentSummary { get; set; } // Resumen automático del contenido (ej. "3 carpetas, 8 archivos")
     }
 
     public class TabSession
@@ -1268,9 +1757,10 @@ namespace NexusFM
         public const string SVG_GEAR = "M 7,1 L 9,1 L 9.4,3.1 L 11.2,3.9 L 13,2.7 L 14.4,4.1 L 13.2,5.9 L 14,7.7 L 16,8.1 L 16,10.1 L 13.9,10.5 L 13.1,12.3 L 14.3,14.1 L 12.9,15.5 L 11.1,14.3 L 9.3,15.1 L 8.9,17 L 6.9,17 L 6.5,14.9 L 4.7,14.1 L 2.9,15.3 L 1.5,13.9 L 2.7,12.1 L 1.9,10.3 L 0,9.9 L 0,7.9 L 2.1,7.5 L 2.9,5.7 L 1.7,3.9 L 3.1,2.5 L 4.9,3.7 L 6.7,2.9 Z M 8,6 A 3,3 0 1 0 8.01,6 Z";
         public const string SVG_TERM = "M 2,3 L 7,8 L 2,13 L 3.5,14.5 L 10,8 L 3.5,1.5 Z M 8,13 L 15,13 L 15,14.5 L 8,14.5 Z";
         public const string SVG_MOVE = "M 2,3 L 7,3 L 8.5,5 L 14,5 L 14,13 L 2,13 Z M 8,6.5 L 8,8.5 L 4.5,8.5 L 4.5,10.5 L 8,10.5 L 8,12.5 L 12,9.5 Z";
+        public const string SVG_NOTE = "M 3,1 L 13,1 L 13,15 L 3,15 Z M 5,4 L 11,4 L 11,5.5 L 5,5.5 Z M 5,7.5 L 11,7.5 L 11,9 L 5,9 Z M 5,11 L 9,11 L 9,12.5 L 5,12.5 Z";
 
-        // Dibuja la carpeta geométrica plana idéntica a la captura 2 (con pestaña angulada de dos tonos)
-        public static FrameworkElement CreateFolderGraphic(double size, ThemePalette p, string model)
+        // Dibuja la carpeta geométrica plana idéntica a la captura 2 (con pestaña angulada de dos tonos e indicador de descripción)
+        public static FrameworkElement CreateFolderGraphic(double size, ThemePalette p, string model, bool hasDescription = false)
         {
             double w = size;
             double h = size * 0.78;
@@ -1278,7 +1768,7 @@ namespace NexusFM
 
             bool isNeon = string.Equals(model, "Neon", StringComparison.OrdinalIgnoreCase);
 
-            // 1. Parte trasera con pestaña angulada (exacta a la carpeta azul de la imagen 2)
+            // 1. Parte trasera con pestaña angulada
             string backPathStr = string.Format(
                 System.Globalization.CultureInfo.InvariantCulture,
                 "M {0:0.0},{1:0.0} L {2:0.0},{1:0.0} L {3:0.0},{4:0.0} L {5:0.0},{4:0.0} L {5:0.0},{6:0.0} L {0:0.0},{6:0.0} Z",
@@ -1297,7 +1787,23 @@ namespace NexusFM
             };
             canvas.Children.Add(backShape);
 
-            // 2. Línea de sombra interior sutil entre pestaña y bolsillo frontal
+            // 2. Hoja interior sutil cuando la carpeta tiene documentos/descripción
+            if (hasDescription && size >= 28)
+            {
+                var paperSlip = new Rectangle
+                {
+                    Width = w * 0.36,
+                    Height = h * 0.14,
+                    RadiusX = 1.5,
+                    RadiusY = 1.5,
+                    Fill = new SolidColorBrush(Color.FromArgb(215, 240, 246, 252))
+                };
+                Canvas.SetLeft(paperSlip, w * 0.50);
+                Canvas.SetTop(paperSlip, h * 0.15);
+                canvas.Children.Add(paperSlip);
+            }
+
+            // 3. Línea de sombra interior sutil entre pestaña y bolsillo frontal
             var pocketLine = new Rectangle
             {
                 Width = w * 0.88,
@@ -1308,7 +1814,7 @@ namespace NexusFM
             Canvas.SetTop(pocketLine, h * 0.27);
             canvas.Children.Add(pocketLine);
 
-            // 3. Cuerpo frontal plano y limpio (Breeze Flat Geometry)
+            // 4. Cuerpo frontal plano y limpio (Breeze Flat Geometry)
             var frontRect = new Rectangle
             {
                 Width = w * 0.88,
@@ -1316,24 +1822,52 @@ namespace NexusFM
                 RadiusX = 2.5,
                 RadiusY = 2.5,
                 Fill = isNeon ? Brush("#171D2B") : Brush(p.Accent),
-                Stroke = isNeon ? Brush(p.AccentLight) : new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)),
-                StrokeThickness = isNeon ? 1.5 : 0.7
+                Stroke = isNeon ? Brush(p.AccentLight) : new SolidColorBrush(Color.FromArgb(55, 255, 255, 255)),
+                StrokeThickness = isNeon ? 1.5 : 0.8
             };
             Canvas.SetLeft(frontRect, w * 0.06);
             Canvas.SetTop(frontRect, h * 0.29);
             canvas.Children.Add(frontRect);
 
-            // 4. Borde inferior sutil de profundidad
+            // 5. Borde inferior sutil de profundidad
             var bottomLip = new Rectangle
             {
                 Width = w * 0.88,
                 Height = 2.0,
                 Fill = Brush(p.AccentDark),
-                Opacity = 0.75
+                Opacity = 0.78
             };
             Canvas.SetLeft(bottomLip, w * 0.06);
             Canvas.SetTop(bottomLip, h * 0.91);
             canvas.Children.Add(bottomLip);
+
+            // 6. Líneas de etiqueta en la portada de la carpeta cuando tiene descripción personalizada
+            if (hasDescription && size >= 36)
+            {
+                var line1 = new Rectangle
+                {
+                    Width = w * 0.34,
+                    Height = Math.Max(1.5, h * 0.045),
+                    RadiusX = 1,
+                    RadiusY = 1,
+                    Fill = new SolidColorBrush(Color.FromArgb(190, 255, 255, 255))
+                };
+                Canvas.SetLeft(line1, w * 0.16);
+                Canvas.SetTop(line1, h * 0.48);
+                canvas.Children.Add(line1);
+
+                var line2 = new Rectangle
+                {
+                    Width = w * 0.22,
+                    Height = Math.Max(1.5, h * 0.045),
+                    RadiusX = 1,
+                    RadiusY = 1,
+                    Fill = new SolidColorBrush(Color.FromArgb(145, 255, 255, 255))
+                };
+                Canvas.SetLeft(line2, w * 0.16);
+                Canvas.SetTop(line2, h * 0.59);
+                canvas.Children.Add(line2);
+            }
 
             return canvas;
         }
@@ -1470,6 +2004,8 @@ namespace NexusFM
         private MainWindow _owner;
         private StackPanel _tabsStack;
         private Border _canvasFrameBorder;
+        private Border _currentFolderDescBar;
+        private TextBlock _currentFolderDescText;
         private Border _detailsHeader;
         private ScrollViewer _canvasScroll;
         private Panel _itemsPanel;
@@ -1512,9 +2048,50 @@ namespace NexusFM
             };
 
             var innerGrid = new Grid();
-            innerGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Banner de filtro por categoría
-            innerGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Cabecera modo detalles
-            innerGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Archivos
+            innerGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 0: Barra de descripción de la carpeta actual
+            innerGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 1: Banner de filtro por categoría
+            innerGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // 2: Cabecera modo detalles
+            innerGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // 3: Archivos
+
+            // 0. Barra superior de descripción de lo que lleva la carpeta actual adentro
+            _currentFolderDescBar = new Border
+            {
+                Padding = new Thickness(14, 6, 14, 6),
+                BorderThickness = new Thickness(0, 0, 0, 1)
+            };
+            var descDock = new DockPanel();
+            var descBtns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+
+            var editCurrentDescBtn = new Border
+            {
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(9, 3, 9, 3),
+                Margin = new Thickness(6, 0, 0, 0),
+                BorderThickness = new Thickness(1),
+                Cursor = Cursors.Hand,
+                ToolTip = "Colocar o editar la descripción de lo que lleva esta carpeta adentro (F10)",
+                Child = new TextBlock { Text = "✎ Colocar / Editar descripción (F10)", FontSize = 11.2, FontWeight = FontWeights.SemiBold, Foreground = Brushes.White }
+            };
+            editCurrentDescBtn.MouseLeftButtonDown += (s, e) =>
+            {
+                e.Handled = true;
+                _owner.SetActivePane(this, false);
+                _owner.OpenFolderDescriptionDialog(ActiveTab.CurrentPath);
+            };
+            descBtns.Children.Add(editCurrentDescBtn);
+            DockPanel.SetDock(descBtns, Dock.Right);
+            descDock.Children.Add(descBtns);
+
+            _currentFolderDescText = new TextBlock
+            {
+                FontSize = 11.8,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            descDock.Children.Add(_currentFolderDescText);
+            _currentFolderDescBar.Child = descDock;
+            Grid.SetRow(_currentFolderDescBar, 0);
+            innerGrid.Children.Add(_currentFolderDescBar);
 
             // Banner cuando se filtra por Documentos / Imágenes / Audio / Video / Código
             _categoryBanner = new Border
@@ -1546,11 +2123,11 @@ namespace NexusFM
             DockPanel.SetDock(clearFilterBtn, Dock.Right);
             bannerDock.Children.Add(clearFilterBtn);
             _categoryBanner.Child = bannerDock;
-            Grid.SetRow(_categoryBanner, 0);
+            Grid.SetRow(_categoryBanner, 1);
             innerGrid.Children.Add(_categoryBanner);
 
             _detailsHeader = BuildDetailsHeader();
-            Grid.SetRow(_detailsHeader, 1);
+            Grid.SetRow(_detailsHeader, 2);
             innerGrid.Children.Add(_detailsHeader);
 
             _canvasScroll = new ScrollViewer
@@ -1592,7 +2169,7 @@ namespace NexusFM
                     e.Handled = true;
                 }
             };
-            Grid.SetRow(_canvasScroll, 2);
+            Grid.SetRow(_canvasScroll, 3);
             innerGrid.Children.Add(_canvasScroll);
 
             _canvasFrameBorder.Child = innerGrid;
@@ -1613,15 +2190,17 @@ namespace NexusFM
             };
 
             var g = new Grid();
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2.2, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.6, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2.0, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(85) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(95) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(105) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(145) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(135) });
 
             g.Children.Add(CreateHeaderLabel("Nombre", 0));
-            g.Children.Add(CreateHeaderLabel("Tipo", 1));
-            g.Children.Add(CreateHeaderLabel("Tamaño", 2));
-            g.Children.Add(CreateHeaderLabel("Modificado", 3));
+            g.Children.Add(CreateHeaderLabel("Descripción / Lo que lleva adentro", 1));
+            g.Children.Add(CreateHeaderLabel("Tipo", 2));
+            g.Children.Add(CreateHeaderLabel("Tamaño", 3));
+            g.Children.Add(CreateHeaderLabel("Modificado", 4));
 
             border.Child = g;
             return border;
@@ -1958,7 +2537,11 @@ namespace NexusFM
                         {
                             if ((d.Attributes & FileAttributes.Hidden) != 0 || (d.Attributes & FileAttributes.System) != 0)
                                 continue;
-                            if (!string.IsNullOrEmpty(filter) && !d.Name.ToLowerInvariant().Contains(filter))
+                            string folderDesc = FolderDescriptionManager.GetDescription(d.FullName);
+                            string folderSummary = FolderDescriptionManager.GetQuickContentSummary(d.FullName);
+                            if (!string.IsNullOrEmpty(filter) &&
+                                !d.Name.ToLowerInvariant().Contains(filter) &&
+                                (string.IsNullOrEmpty(folderDesc) || !folderDesc.ToLowerInvariant().Contains(filter)))
                                 continue;
 
                             CurrentItems.Add(new FileItem
@@ -1968,12 +2551,14 @@ namespace NexusFM
                                 IsDirectory = true,
                                 Extension = "Carpeta",
                                 RawSize = 0,
-                                SizeText = "Carpeta",
+                                SizeText = folderSummary,
                                 ModifiedDate = d.LastWriteTime,
                                 CreatedDate = d.CreationTime,
                                 AccessedDate = d.LastAccessTime,
                                 ModifiedText = FormatRelativeTime(d.LastWriteTime),
-                                Category = "DIR"
+                                Category = "DIR",
+                                Description = folderDesc,
+                                ContentSummary = folderSummary
                             });
                         }
                         catch { }
@@ -2027,6 +2612,139 @@ namespace NexusFM
             }
         }
 
+        private ToolTip BuildRichFolderToolTip(FileItem item, ThemePalette p)
+        {
+            var tipBorder = new Border
+            {
+                Background = VectorStudio.Brush(p.BgPopup),
+                BorderBrush = VectorStudio.Brush(p.Accent),
+                BorderThickness = new Thickness(1.2),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(12, 9, 12, 9),
+                MaxWidth = 340
+            };
+
+            var stack = new StackPanel();
+            stack.Children.Add(new TextBlock
+            {
+                Text = "📁 " + item.DisplayName,
+                FontSize = 13,
+                FontWeight = FontWeights.Bold,
+                Foreground = VectorStudio.Brush(p.TextMain),
+                Margin = new Thickness(0, 0, 0, 4)
+            });
+
+            bool hasCustomDesc = !string.IsNullOrWhiteSpace(item.Description);
+            stack.Children.Add(new TextBlock
+            {
+                Text = hasCustomDesc
+                    ? "📝 Descripción: " + item.Description
+                    : "📝 Sin descripción personalizada aún.",
+                FontSize = 12,
+                FontWeight = hasCustomDesc ? FontWeights.SemiBold : FontWeights.Normal,
+                Foreground = VectorStudio.Brush(hasCustomDesc ? p.AccentLight : p.TextMuted),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 4)
+            });
+
+            stack.Children.Add(new TextBlock
+            {
+                Text = "📦 Contenido adentro: " + (string.IsNullOrEmpty(item.ContentSummary) ? "Carpeta" : item.ContentSummary) + "  •  " + item.ModifiedText,
+                FontSize = 11.2,
+                Foreground = VectorStudio.Brush(p.TextMuted),
+                TextWrapping = TextWrapping.Wrap
+            });
+
+            stack.Children.Add(new TextBlock
+            {
+                Text = "💡 Haz clic en [✎] o presiona F10 para colocar o editar su descripción",
+                FontSize = 10.5,
+                Foreground = VectorStudio.Brush(p.Accent),
+                Margin = new Thickness(0, 5, 0, 0)
+            });
+
+            tipBorder.Child = stack;
+            return new ToolTip
+            {
+                Content = tipBorder,
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Padding = new Thickness(0)
+            };
+        }
+
+        private Border CreateEditDescriptionMiniButton(FileItem item, ThemePalette p)
+        {
+            bool hasDesc = !string.IsNullOrWhiteSpace(item.Description);
+            var btn = new Border
+            {
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(6, 2, 6, 2),
+                Margin = new Thickness(6, 0, 0, 0),
+                Cursor = Cursors.Hand,
+                Background = VectorStudio.Brush(hasDesc ? p.SelectBg : p.BgCanvas),
+                BorderBrush = VectorStudio.Brush(hasDesc ? p.Accent : p.Border),
+                BorderThickness = new Thickness(1),
+                VerticalAlignment = VerticalAlignment.Center,
+                ToolTip = "Colocar o editar descripción de lo que lleva '" + item.DisplayName + "' adentro (F10)",
+                Child = new TextBlock
+                {
+                    Text = hasDesc ? "✎ Nota" : "＋ Nota",
+                    FontSize = 10.2,
+                    FontWeight = FontWeights.SemiBold,
+                    Foreground = VectorStudio.Brush(hasDesc ? p.AccentLight : p.TextMuted)
+                }
+            };
+            btn.MouseLeftButtonDown += (s, e) =>
+            {
+                e.Handled = true;
+                _owner.SetActivePane(this, false);
+                _owner.OpenFolderDescriptionDialog(item.FullPath);
+            };
+            return btn;
+        }
+
+        private void RefreshCurrentFolderDescriptionBanner()
+        {
+            if (_currentFolderDescBar == null || ActiveTab == null) return;
+            var p = _owner.ActivePalette;
+            string curPath = ActiveTab.CurrentPath;
+            string curDesc = FolderDescriptionManager.GetDescription(curPath);
+            bool hasDesc = !string.IsNullOrWhiteSpace(curDesc);
+
+            _currentFolderDescBar.Background = VectorStudio.Brush(hasDesc ? p.SelectBg : p.BgChrome);
+            _currentFolderDescBar.BorderBrush = VectorStudio.Brush(p.Border);
+
+            var dock = _currentFolderDescBar.Child as DockPanel;
+            if (dock != null && dock.Children.Count > 0)
+            {
+                var btnsStack = dock.Children[0] as StackPanel;
+                if (btnsStack != null && btnsStack.Children.Count > 0)
+                {
+                    var editBtn = btnsStack.Children[0] as Border;
+                    if (editBtn != null)
+                    {
+                        editBtn.Background = VectorStudio.Brush(p.BgCanvas);
+                        editBtn.BorderBrush = VectorStudio.Brush(p.Accent);
+                    }
+                }
+            }
+
+            if (hasDesc)
+            {
+                _currentFolderDescText.Text = "📝 " + ActiveTab.Title + ": \"" + curDesc + "\"";
+                _currentFolderDescText.Foreground = VectorStudio.Brush(p.AccentLight);
+                _currentFolderDescText.FontWeight = FontWeights.SemiBold;
+            }
+            else
+            {
+                string quick = FolderDescriptionManager.GetQuickContentSummary(curPath);
+                _currentFolderDescText.Text = "📁 " + ActiveTab.Title + " (" + quick + ") — Sin descripción personalizada aún. Haz clic en [✎ Colocar / Editar descripción] para anotar qué lleva adentro.";
+                _currentFolderDescText.Foreground = VectorStudio.Brush(p.TextMuted);
+                _currentFolderDescText.FontWeight = FontWeights.Normal;
+            }
+        }
+
         public void RenderItems()
         {
             var p = _owner.ActivePalette;
@@ -2038,6 +2756,7 @@ namespace NexusFM
             _canvasFrameBorder.BorderBrush = VectorStudio.Brush(_owner.ActivePane == this ? p.CanvasFrame : p.Border);
             _detailsHeader.Background = VectorStudio.Brush(p.BgChrome);
             _detailsHeader.BorderBrush = VectorStudio.Brush(p.Border);
+            RefreshCurrentFolderDescriptionBanner();
 
             bool isDetails = string.Equals(model, "Details", StringComparison.OrdinalIgnoreCase);
             bool isCards = string.Equals(model, "Cards", StringComparison.OrdinalIgnoreCase);
@@ -2052,6 +2771,7 @@ namespace NexusFM
                     var item = CurrentItems[i];
                     bool isSelected = SelectedPaths.Contains(item.FullPath);
                     bool isCursor = (i == CursorIndex);
+                    bool hasDesc = item.IsDirectory && !string.IsNullOrWhiteSpace(item.Description);
 
                     var rowBorder = new Border
                     {
@@ -2063,16 +2783,18 @@ namespace NexusFM
                         BorderBrush = (isSelected || isCursor) ? VectorStudio.Brush(p.Accent) : Brushes.Transparent,
                         BorderThickness = new Thickness(isSelected || isCursor ? 1 : 0)
                     };
+                    if (item.IsDirectory) rowBorder.ToolTip = BuildRichFolderToolTip(item, p);
 
                     var g = new Grid();
-                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2.2, GridUnitType.Star) });
+                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.6, GridUnitType.Star) });
+                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2.0, GridUnitType.Star) });
+                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(85) });
                     g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(95) });
-                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(105) });
-                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(145) });
+                    g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(135) });
 
                     var nameStack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
                     var miniIcon = item.IsDirectory
-                        ? VectorStudio.CreateFolderGraphic(22, p, "Breeze")
+                        ? VectorStudio.CreateFolderGraphic(24, p, "Breeze", hasDesc)
                         : VectorStudio.CreateFileGraphic(22, p, item.Extension, item);
                     miniIcon.Margin = new Thickness(0, 0, 10, 0);
                     nameStack.Children.Add(miniIcon);
@@ -2080,22 +2802,46 @@ namespace NexusFM
                     {
                         Text = item.DisplayName,
                         Foreground = VectorStudio.Brush(p.TextMain),
+                        FontWeight = item.IsDirectory ? FontWeights.SemiBold : FontWeights.Normal,
                         VerticalAlignment = VerticalAlignment.Center,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
                         FontSize = 12.5
                     });
                     Grid.SetColumn(nameStack, 0);
                     g.Children.Add(nameStack);
 
+                    // Columna 1: Descripción de la carpeta o resumen de lo que lleva adentro
+                    var descDock = new DockPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 8, 0) };
+                    if (item.IsDirectory)
+                    {
+                        var editBtn = CreateEditDescriptionMiniButton(item, p);
+                        DockPanel.SetDock(editBtn, Dock.Right);
+                        descDock.Children.Add(editBtn);
+                    }
+                    descDock.Children.Add(new TextBlock
+                    {
+                        Text = item.IsDirectory
+                            ? (hasDesc ? "📝 " + item.Description : "📦 " + (item.ContentSummary ?? "Carpeta"))
+                            : "",
+                        Foreground = VectorStudio.Brush(hasDesc ? p.AccentLight : p.TextMuted),
+                        FontStyle = hasDesc ? FontStyles.Normal : FontStyles.Italic,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        FontSize = 11.8
+                    });
+                    Grid.SetColumn(descDock, 1);
+                    g.Children.Add(descDock);
+
                     var typeTb = new TextBlock { Text = item.Extension, Foreground = VectorStudio.Brush(p.TextMuted), VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
-                    Grid.SetColumn(typeTb, 1);
+                    Grid.SetColumn(typeTb, 2);
                     g.Children.Add(typeTb);
 
                     var sizeTb = new TextBlock { Text = item.SizeText, Foreground = VectorStudio.Brush(p.TextMuted), VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
-                    Grid.SetColumn(sizeTb, 2);
+                    Grid.SetColumn(sizeTb, 3);
                     g.Children.Add(sizeTb);
 
                     var modTb = new TextBlock { Text = item.ModifiedText, Foreground = VectorStudio.Brush(p.TextMuted), VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
-                    Grid.SetColumn(modTb, 3);
+                    Grid.SetColumn(modTb, 4);
                     g.Children.Add(modTb);
 
                     rowBorder.Child = g;
@@ -2115,11 +2861,12 @@ namespace NexusFM
                     var item = CurrentItems[i];
                     bool isSelected = SelectedPaths.Contains(item.FullPath);
                     bool isCursor = (i == CursorIndex);
+                    bool hasDesc = item.IsDirectory && !string.IsNullOrWhiteSpace(item.Description);
 
                     var card = new Border
                     {
-                        Width = 230,
-                        Height = 64,
+                        Width = 264,
+                        Height = 82,
                         Margin = new Thickness(6),
                         Padding = new Thickness(12, 8, 12, 8),
                         CornerRadius = new CornerRadius(6),
@@ -2128,31 +2875,80 @@ namespace NexusFM
                         BorderBrush = (isSelected || isCursor) ? VectorStudio.Brush(p.Accent) : VectorStudio.Brush(p.Border),
                         BorderThickness = new Thickness(isSelected || isCursor ? 1.4 : 1)
                     };
+                    if (item.IsDirectory) card.ToolTip = BuildRichFolderToolTip(item, p);
 
-                    var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                    var row = new Grid();
+                    row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
                     var icon = item.IsDirectory
-                        ? VectorStudio.CreateFolderGraphic(42, p, "Breeze")
+                        ? VectorStudio.CreateFolderGraphic(44, p, "Breeze", hasDesc)
                         : VectorStudio.CreateFileGraphic(42, p, item.Extension, item);
                     icon.Margin = new Thickness(0, 0, 12, 0);
+                    icon.VerticalAlignment = VerticalAlignment.Center;
+                    Grid.SetColumn(icon, 0);
                     row.Children.Add(icon);
 
                     var info = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-                    info.Children.Add(new TextBlock
+                    var topTitleDock = new DockPanel();
+                    if (item.IsDirectory)
+                    {
+                        var editBtn = CreateEditDescriptionMiniButton(item, p);
+                        DockPanel.SetDock(editBtn, Dock.Right);
+                        topTitleDock.Children.Add(editBtn);
+                    }
+                    topTitleDock.Children.Add(new TextBlock
                     {
                         Text = item.DisplayName,
                         Foreground = VectorStudio.Brush(p.TextMain),
                         FontWeight = FontWeights.SemiBold,
-                        FontSize = 12.5,
-                        MaxWidth = 148,
-                        TextTrimming = TextTrimming.CharacterEllipsis
+                        FontSize = 12.6,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        VerticalAlignment = VerticalAlignment.Center
                     });
-                    info.Children.Add(new TextBlock
+                    info.Children.Add(topTitleDock);
+
+                    if (item.IsDirectory)
                     {
-                        Text = item.IsDirectory ? item.ModifiedText : item.SizeText + " • " + item.Extension,
-                        Foreground = VectorStudio.Brush(p.TextMuted),
-                        FontSize = 11,
-                        Margin = new Thickness(0, 2, 0, 0)
-                    });
+                        info.Children.Add(new TextBlock
+                        {
+                            Text = hasDesc ? item.Description : ("📦 " + (item.ContentSummary ?? "Carpeta")),
+                            Foreground = VectorStudio.Brush(hasDesc ? p.AccentLight : p.TextMuted),
+                            FontSize = 11.2,
+                            FontWeight = hasDesc ? FontWeights.Medium : FontWeights.Normal,
+                            TextWrapping = TextWrapping.Wrap,
+                            TextTrimming = TextTrimming.CharacterEllipsis,
+                            MaxHeight = 30,
+                            Margin = new Thickness(0, 2, 0, 0)
+                        });
+                        info.Children.Add(new TextBlock
+                        {
+                            Text = hasDesc ? ((item.ContentSummary ?? "Carpeta") + " • " + item.ModifiedText) : ("Clic en +Nota o F10 para describir • " + item.ModifiedText),
+                            Foreground = VectorStudio.Brush(p.TextMuted),
+                            FontSize = 10.2,
+                            TextTrimming = TextTrimming.CharacterEllipsis,
+                            Margin = new Thickness(0, 2, 0, 0)
+                        });
+                    }
+                    else
+                    {
+                        info.Children.Add(new TextBlock
+                        {
+                            Text = item.SizeText + " • " + item.Extension,
+                            Foreground = VectorStudio.Brush(p.TextMuted),
+                            FontSize = 11.2,
+                            Margin = new Thickness(0, 3, 0, 0)
+                        });
+                        info.Children.Add(new TextBlock
+                        {
+                            Text = item.ModifiedText,
+                            Foreground = VectorStudio.Brush(p.TextMuted),
+                            FontSize = 10.2,
+                            Margin = new Thickness(0, 2, 0, 0)
+                        });
+                    }
+
+                    Grid.SetColumn(info, 1);
                     row.Children.Add(info);
 
                     card.Child = row;
@@ -2165,10 +2961,10 @@ namespace NexusFM
             }
             else
             {
-                // Vista de carpetas geométricas planas Breeze (idéntica a la imagen 2)
+                // Vista de carpetas geométricas planas Breeze / Cyber Neón con descripción debajo del título
                 var wrap = new WrapPanel { Orientation = Orientation.Horizontal };
-                double tileW = zoom + 44;
-                double tileH = zoom + 38;
+                double tileW = zoom + 54;
+                double tileH = zoom + 62;
 
                 for (int i = 0; i < CurrentItems.Count; i++)
                 {
@@ -2176,6 +2972,7 @@ namespace NexusFM
                     var item = CurrentItems[i];
                     bool isSelected = SelectedPaths.Contains(item.FullPath);
                     bool isCursor = (i == CursorIndex);
+                    bool hasDesc = item.IsDirectory && !string.IsNullOrWhiteSpace(item.Description);
 
                     var tile = new Border
                     {
@@ -2189,10 +2986,11 @@ namespace NexusFM
                         BorderBrush = (isSelected || isCursor) ? VectorStudio.Brush(p.Accent) : Brushes.Transparent,
                         BorderThickness = new Thickness(isSelected || isCursor ? 1.3 : 0)
                     };
+                    if (item.IsDirectory) tile.ToolTip = BuildRichFolderToolTip(item, p);
 
                     var stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
                     var art = item.IsDirectory
-                        ? VectorStudio.CreateFolderGraphic(zoom, p, model)
+                        ? VectorStudio.CreateFolderGraphic(zoom, p, model, hasDesc)
                         : VectorStudio.CreateFileGraphic(zoom, p, item.Extension, item);
                     stack.Children.Add(art);
 
@@ -2200,13 +2998,31 @@ namespace NexusFM
                     {
                         Text = item.DisplayName,
                         Foreground = VectorStudio.Brush(p.TextMain),
+                        FontWeight = item.IsDirectory ? FontWeights.SemiBold : FontWeights.Normal,
                         FontSize = 12.2,
                         TextAlignment = TextAlignment.Center,
                         TextTrimming = TextTrimming.CharacterEllipsis,
                         MaxWidth = tileW - 10,
-                        Margin = new Thickness(0, 5, 0, 0)
+                        Margin = new Thickness(0, 4, 0, 0)
                     };
                     stack.Children.Add(lbl);
+
+                    if (item.IsDirectory)
+                    {
+                        var descLbl = new TextBlock
+                        {
+                            Text = hasDesc ? item.Description : (item.ContentSummary ?? ""),
+                            Foreground = VectorStudio.Brush(hasDesc ? p.AccentLight : p.TextMuted),
+                            FontSize = 10.4,
+                            TextAlignment = TextAlignment.Center,
+                            TextWrapping = TextWrapping.Wrap,
+                            TextTrimming = TextTrimming.CharacterEllipsis,
+                            MaxWidth = tileW - 8,
+                            MaxHeight = 28,
+                            Margin = new Thickness(0, 1, 0, 0)
+                        };
+                        stack.Children.Add(descLbl);
+                    }
 
                     tile.Child = stack;
                     RenderedTiles.Add(tile);
@@ -2527,7 +3343,7 @@ namespace NexusFM
             int cols = 1;
             if (!isDetails && _canvasScroll.ActualWidth > 0)
             {
-                double tileW = isCards ? 242 : (_owner.Config.IconSize + 60);
+                double tileW = isCards ? 276 : (_owner.Config.IconSize + 70);
                 cols = Math.Max(1, (int)((_canvasScroll.ActualWidth - 36) / tileW));
             }
 
@@ -2764,6 +3580,7 @@ namespace NexusFM
         private StackPanel _breadcrumbsPanel;
         private TextBox _pathInputBox;
         private TextBox _searchBox;
+        private Border _btnDescribeFolderToggle;
         private Border _btnMoveToFolderToggle;
         private Border _btnSplitToggle;
         private Border _btnAnalyzerToggle;
@@ -2788,10 +3605,14 @@ namespace NexusFM
         private bool _clipboardIsCut;
         private Popup _contextPopup;
         private DispatcherTimer _explorerInterceptorTimer;
+        private bool _isSilentStartupBoot;
+        public string ActiveStableFolderIcoPath { get; private set; }
 
-        public MainWindow(string startupPath)
+        public MainWindow(string startupPath, bool silentStartupBoot = false)
         {
+            _isSilentStartupBoot = silentStartupBoot;
             InjectModernDarkScrollBarStyle();
+            FolderDescriptionManager.EnsureLoaded();
 
             Config = UserConfig.Load();
             _clipboardPaths = new List<string>();
@@ -2922,6 +3743,7 @@ namespace NexusFM
             SetActivePane(LeftPane);
 
             StartExplorerInterceptorTimer();
+            ApplyWindowsStartupRegistry(Config.AutoStartWithWindows);
             if (Config.ReplaceWindowsExplorer)
             {
                 ApplyWindowsExplorerRegistry(true);
@@ -2929,9 +3751,60 @@ namespace NexusFM
 
             Loaded += (s, e) =>
             {
-                LeftPane.Focus();
-                Task.Run(() => IconExtractor.PrecompileAndRepairDesktopAppIcons());
+                if (_isSilentStartupBoot)
+                {
+                    Hide();
+                }
+                else
+                {
+                    LeftPane.Focus();
+                }
+
+                ScheduleStartupIconSyncWaves();
             };
+        }
+
+        private void ScheduleStartupIconSyncWaves()
+        {
+            // Oleada 1: Inmediata al abrir o iniciar Windows
+            Task.Run(() =>
+            {
+                IconExtractor.PrecompileAndRepairDesktopAppIcons(ActiveStableFolderIcoPath, Config.ReplaceWindowsExplorer, Config.RecentLocations);
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (LeftPane != null) LeftPane.RenderItems();
+                    if (IsSplitView && RightPane != null) RightPane.RenderItems();
+                }));
+            });
+
+            // Oleada 2: A los 4.5 segundos (cuando explorer.exe termina de inicializar el Escritorio tras el arranque de Windows)
+            var wave2 = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4.5) };
+            wave2.Tick += (s, e) =>
+            {
+                wave2.Stop();
+                Task.Run(() =>
+                {
+                    if (Config.ReplaceWindowsExplorer)
+                        IconExtractor.ApplyNexusIconToDesktopFolders(ActiveStableFolderIcoPath, true, Config.RecentLocations);
+                    NativeWin32.RefreshShell(true);
+                });
+            };
+            wave2.Start();
+
+            // Oleada 3: A los 12 segundos (cuando OneDrive termina de montar carpetas del Escritorio al iniciar Windows)
+            if (_isSilentStartupBoot)
+            {
+                var wave3 = new DispatcherTimer { Interval = TimeSpan.FromSeconds(12.0) };
+                wave3.Tick += (s, e) =>
+                {
+                    wave3.Stop();
+                    Task.Run(() =>
+                    {
+                        IconExtractor.PrecompileAndRepairDesktopAppIcons(ActiveStableFolderIcoPath, Config.ReplaceWindowsExplorer, Config.RecentLocations);
+                    });
+                };
+                wave3.Start();
+            }
         }
 
         // Reemplaza la barra de desplazamiento blanca clásica de Windows por una píldora oscura de 6px (como en la imagen 2)
@@ -3355,6 +4228,7 @@ namespace NexusFM
         {
             try
             {
+                ShowInTaskbar = true;
                 if (!IsVisible) Show();
                 if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
                 Activate();
@@ -3496,6 +4370,50 @@ namespace NexusFM
             return capturedPath;
         }
 
+        public void ApplyWindowsStartupRegistry(bool enable)
+        {
+            try
+            {
+                string exePath = Process.GetCurrentProcess().MainModule.FileName;
+                using (var runKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
+                {
+                    if (runKey != null)
+                    {
+                        if (enable)
+                            runKey.SetValue("NexusFM", "\"" + exePath + "\" --startup");
+                        else
+                            runKey.DeleteValue("NexusFM", false);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public void RepairAndRefreshAllIconsNow(bool showStatusMessage)
+        {
+            try
+            {
+                IconExtractor.ClearCache();
+                ApplyWindowsStartupRegistry(Config.AutoStartWithWindows);
+                ApplyWindowsExplorerRegistry(Config.ReplaceWindowsExplorer);
+
+                Task.Run(() =>
+                {
+                    IconExtractor.PrecompileAndRepairDesktopAppIcons(ActiveStableFolderIcoPath, Config.ReplaceWindowsExplorer, Config.RecentLocations);
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (LeftPane != null) { LeftPane.ReadEntries(); LeftPane.RenderItems(); }
+                        if (IsSplitView && RightPane != null) { RightPane.ReadEntries(); RightPane.RenderItems(); }
+                        if (showStatusMessage && _statusLeftLabel != null)
+                        {
+                            _statusLeftLabel.Text = "✔ Iconos de carpetas, juegos, softwares y arranque de Windows reparados y actualizados.";
+                        }
+                    }));
+                });
+            }
+            catch { }
+        }
+
         public void ApplyWindowsExplorerRegistry(bool enable)
         {
             try
@@ -3505,9 +4423,12 @@ namespace NexusFM
                 string assetsDir = System.IO.Path.Combine(exeDir, "assets");
                 string accentHex = ActivePalette != null ? ActivePalette.Accent : "#4DA2DB";
 
-                // 1. Generar el icono multi-resolución (256/64/48/32/16px) con el color de NexusFM
+                // 1. Generar el icono multi-resolución (256/64/48/32/16px) en ruta local inmutable (%LOCALAPPDATA%\NexusFM\assets) y en el repo
                 string icoPath = IconExtractor.GenerateMultiSizeFolderIco(assetsDir, accentHex);
                 if (!File.Exists(icoPath)) icoPath = exePath;
+                ActiveStableFolderIcoPath = icoPath;
+
+                ApplyWindowsStartupRegistry(Config.AutoStartWithWindows);
 
                 if (enable)
                 {
@@ -3575,8 +4496,9 @@ namespace NexusFM
                     }
                 }
 
-                // 3. Aplicar (o restaurar) el icono de NexusFM a todas las carpetas en el Escritorio de Windows
-                IconExtractor.ApplyNexusIconToDesktopFolders(icoPath, enable);
+                // 3. Aplicar (o restaurar) el icono de NexusFM a todas las carpetas en el Escritorio de Windows (hasta 4 niveles)
+                var recentSnap = Config.RecentLocations != null ? Config.RecentLocations.ToList() : new List<string>();
+                Task.Run(() => IconExtractor.ApplyNexusIconToDesktopFolders(icoPath, enable, recentSnap));
             }
             catch { }
         }
@@ -3737,6 +4659,9 @@ namespace NexusFM
                 }
             };
             rightBar.Children.Add(_searchBox);
+
+            _btnDescribeFolderToggle = CreateIconTextPill(VectorStudio.SVG_NOTE, "Descripción", "Colocar o editar la descripción de lo que lleva la carpeta adentro (F10)", () => OpenFolderDescriptionDialog(null));
+            rightBar.Children.Add(_btnDescribeFolderToggle);
 
             _btnMoveToFolderToggle = CreateIconTextPill(VectorStudio.SVG_MOVE, "Mover a...", "Mover carpeta o archivo seleccionado buscando la carpeta destino (Ctrl+M o tecla M)", () => OpenMoveToFolderOverlay());
             rightBar.Children.Add(_btnMoveToFolderToggle);
@@ -3961,6 +4886,32 @@ namespace NexusFM
             btnToggleReplace.BorderBrush = VectorStudio.Brush("#4DA2DB");
             btnToggleReplace.Margin = new Thickness(0, 0, 0, 6);
             expStack.Children.Add(btnToggleReplace);
+
+            Border btnToggleAutoStart = null;
+            btnToggleAutoStart = CreatePillButton(
+                Config.AutoStartWithWindows ? "✔ Iniciar y Actualizar Iconos con Windows: Activo" : "Iniciar y Actualizar Iconos con Windows: Inactivo",
+                "Sincroniza y repara todos los iconos automáticamente cada vez que inicia Windows", () =>
+                {
+                    Config.AutoStartWithWindows = !Config.AutoStartWithWindows;
+                    Config.Save();
+                    ApplyWindowsStartupRegistry(Config.AutoStartWithWindows);
+                    ((TextBlock)btnToggleAutoStart.Child).Text = Config.AutoStartWithWindows
+                        ? "✔ Iniciar y Actualizar Iconos con Windows: Activo"
+                        : "Iniciar y Actualizar Iconos con Windows: Inactivo";
+                });
+            btnToggleAutoStart.Background = VectorStudio.Brush("#183028");
+            btnToggleAutoStart.BorderBrush = VectorStudio.Brush("#2ECC71");
+            btnToggleAutoStart.Margin = new Thickness(0, 0, 0, 6);
+            expStack.Children.Add(btnToggleAutoStart);
+
+            var btnRepairIconsNow = CreatePillButton("🔄 Reparar y Actualizar Iconos Ahora", "Regenera y repara todos los iconos de carpetas, juegos y softwares en Windows y NexusFM", () =>
+            {
+                RepairAndRefreshAllIconsNow(true);
+            });
+            btnRepairIconsNow.Background = VectorStudio.Brush("#1C2838");
+            btnRepairIconsNow.BorderBrush = VectorStudio.Brush("#00F0FF");
+            btnRepairIconsNow.Margin = new Thickness(0, 0, 0, 6);
+            expStack.Children.Add(btnRepairIconsNow);
 
             var btnBackToWin = CreatePillButton("Regresar a Windows Explorer y Salir", "Restaura explorer.exe y cierra NexusFM", () =>
             {
@@ -5215,8 +6166,12 @@ namespace NexusFM
                         {
                             if (isMove)
                             {
+                                string runningExe = Process.GetCurrentProcess().MainModule.FileName;
+                                bool containsRunningSelf = runningExe.StartsWith(fullSrc.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
+
                                 bool movedFast = false;
-                                if (!Directory.Exists(dst) &&
+                                if (!containsRunningSelf &&
+                                    !Directory.Exists(dst) &&
                                     string.Equals(System.IO.Path.GetPathRoot(fullSrc), System.IO.Path.GetPathRoot(dst), StringComparison.OrdinalIgnoreCase))
                                 {
                                     try
@@ -5236,8 +6191,16 @@ namespace NexusFM
                                 if (!movedFast)
                                 {
                                     RobustCopyDirectory(fullSrc, dst);
-                                    RobustDeleteDirectory(fullSrc);
+                                    if (!containsRunningSelf)
+                                    {
+                                        RobustDeleteDirectory(fullSrc);
+                                    }
+                                    else
+                                    {
+                                        lastError = "La carpeta contiene el ejecutable activo de NexusFM; se realizó una copia segura sin borrar el origen.";
+                                    }
                                 }
+                                FolderDescriptionManager.MigrateDescriptionPath(fullSrc, dst);
                             }
                             else
                             {
@@ -5616,6 +6579,13 @@ namespace NexusFM
             _infoMetaTable = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
             stack.Children.Add(_infoMetaTable);
 
+            var btnDescribeDock = CreateIconTextPill(VectorStudio.SVG_NOTE, "Descripción de Carpeta (F10)", "", () =>
+            {
+                OpenFolderDescriptionDialog(null);
+            });
+            btnDescribeDock.Margin = new Thickness(0, 0, 0, 6);
+            stack.Children.Add(btnDescribeDock);
+
             var btnEditInline = CreateIconTextPill(VectorStudio.SVG_EDIT, "Editar Archivo (Ctrl+E)", "", () =>
             {
                 var cur = ActivePane.GetCurrentCursorItem();
@@ -5695,21 +6665,32 @@ namespace NexusFM
 
             if (item == null)
             {
-                _infoArtworkHolder.Child = VectorStudio.CreateFolderGraphic(96, p, Config.FolderModel);
+                string curDir = ActivePane != null ? ActivePane.ActiveTab.CurrentPath : "";
+                string curDesc = FolderDescriptionManager.GetDescription(curDir);
+                _infoArtworkHolder.Child = VectorStudio.CreateFolderGraphic(96, p, Config.FolderModel, !string.IsNullOrEmpty(curDesc));
                 _infoTitle.Text = ActivePane != null ? ActivePane.ActiveTab.Title : "Carpeta";
-                AddMetaRow("Tipo:", "Carpeta");
+                AddMetaRow("Tipo:", "Carpeta actual");
                 AddMetaRow("Elementos:", (ActivePane != null ? ActivePane.CurrentItems.Count : 0).ToString());
+                AddMetaRow("Descripción:", !string.IsNullOrEmpty(curDesc) ? curDesc : "Sin descripción (F10 para agregar)");
                 _infoTextPreview.Visibility = Visibility.Collapsed;
                 return;
             }
 
             _infoArtworkHolder.Child = item.IsDirectory
-                ? VectorStudio.CreateFolderGraphic(96, p, Config.FolderModel)
+                ? VectorStudio.CreateFolderGraphic(96, p, Config.FolderModel, !string.IsNullOrEmpty(item.Description))
                 : VectorStudio.CreateFileGraphic(92, p, item.Extension, item);
 
             _infoTitle.Text = item.DisplayName;
             AddMetaRow("Tipo:", item.IsDirectory ? "Carpeta" : "Archivo " + item.Extension);
-            if (!item.IsDirectory) AddMetaRow("Tamaño:", item.SizeText);
+            if (item.IsDirectory)
+            {
+                AddMetaRow("Adentro:", string.IsNullOrEmpty(item.ContentSummary) ? "Carpeta" : item.ContentSummary);
+                AddMetaRow("Descripción:", !string.IsNullOrEmpty(item.Description) ? item.Description : "Sin descripción (F10 para colocar)");
+            }
+            else
+            {
+                AddMetaRow("Tamaño:", item.SizeText);
+            }
             AddMetaRow("Modificado:", item.ModifiedText);
             AddMetaRow("Creado:", NexusPaneControl.FormatRelativeTime(item.CreatedDate));
 
@@ -5907,6 +6888,21 @@ namespace NexusFM
 
             if (targetItem != null && targetItem.IsDirectory)
             {
+                stack.Children.Add(CreateMenuRow("📝", "Colocar / Editar descripción de lo que lleva adentro...", "F10", false, () =>
+                {
+                    OpenFolderDescriptionDialog(targetItem.FullPath);
+                }));
+                stack.Children.Add(CreateMenuRow("✨", "Auto-describir carpeta según su contenido", "", false, () =>
+                {
+                    string autoDesc = FolderDescriptionManager.GenerateSmartAutoDescription(targetItem.FullPath);
+                    FolderDescriptionManager.SetDescription(targetItem.FullPath, autoDesc, ActiveStableFolderIcoPath, Config.ReplaceWindowsExplorer);
+                    ActivePane.ReadEntries();
+                    ActivePane.RenderItems();
+                    UpdateInfoDock(ActivePane.GetCurrentCursorItem());
+                    if (_statusLeftLabel != null)
+                        _statusLeftLabel.Text = "✔ Descripción actualizada para '" + targetItem.DisplayName + "': " + autoDesc;
+                }));
+                stack.Children.Add(CreateMenuSeparator());
                 stack.Children.Add(CreateMenuRow("📑", "Abrir en una pestaña nueva", "Control+T", false, () =>
                 {
                     ActivePane.AddNewTab(targetItem.FullPath);
@@ -5915,6 +6911,14 @@ namespace NexusFM
                 {
                     if (!IsSplitView) ToggleSplitView();
                     RightPane.LoadDirectory(targetItem.FullPath, true);
+                }));
+                stack.Children.Add(CreateMenuSeparator());
+            }
+            else if (targetItem == null && ActivePane != null)
+            {
+                stack.Children.Add(CreateMenuRow("📝", "Colocar / Editar descripción de esta carpeta actual...", "F10", false, () =>
+                {
+                    OpenFolderDescriptionDialog(ActivePane.ActiveTab.CurrentPath);
                 }));
                 stack.Children.Add(CreateMenuSeparator());
             }
@@ -6508,12 +7512,203 @@ namespace NexusFM
             try
             {
                 string dst = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(item.FullPath), next);
-                if (item.IsDirectory) Directory.Move(item.FullPath, dst);
-                else File.Move(item.FullPath, dst);
+                if (item.IsDirectory)
+                {
+                    var di = new DirectoryInfo(item.FullPath);
+                    if ((di.Attributes & FileAttributes.ReadOnly) != 0)
+                        di.Attributes &= ~FileAttributes.ReadOnly;
+                    Directory.Move(item.FullPath, dst);
+                    if (Config.ReplaceWindowsExplorer)
+                        di.Attributes |= FileAttributes.ReadOnly;
+                    FolderDescriptionManager.MigrateDescriptionPath(item.FullPath, dst);
+                }
+                else
+                {
+                    File.Move(item.FullPath, dst);
+                }
                 ActivePane.ReadEntries();
                 ActivePane.RenderItems();
             }
             catch { }
+        }
+
+        public void OpenFolderDescriptionDialog(string explicitFolderPath)
+        {
+            string targetFolder = explicitFolderPath;
+            if (string.IsNullOrWhiteSpace(targetFolder) && ActivePane != null)
+            {
+                var cur = ActivePane.GetCurrentCursorItem();
+                if (cur != null && cur.IsDirectory)
+                    targetFolder = cur.FullPath;
+                else
+                    targetFolder = ActivePane.ActiveTab.CurrentPath;
+            }
+
+            if (string.IsNullOrWhiteSpace(targetFolder) || !Directory.Exists(targetFolder)) return;
+
+            var p = ActivePalette;
+            string folderTitle = NexusPaneControl.GetFolderTitle(targetFolder);
+            string currentDesc = FolderDescriptionManager.GetDescription(targetFolder);
+            string autoContent = FolderDescriptionManager.GetQuickContentSummary(targetFolder);
+
+            var win = new Window
+            {
+                Title = "Descripción de carpeta — " + folderTitle,
+                Width = 490,
+                Height = 290,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                WindowStyle = WindowStyle.None,
+                Background = VectorStudio.Brush(p.BgPopup),
+                Foreground = VectorStudio.Brush(p.TextMain),
+                ResizeMode = ResizeMode.NoResize
+            };
+
+            var outer = new Border
+            {
+                BorderBrush = VectorStudio.Brush(p.Accent),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(20)
+            };
+
+            var stack = new StackPanel();
+
+            var headerRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 10) };
+            var folderArt = VectorStudio.CreateFolderGraphic(38, p, Config.FolderModel, true);
+            folderArt.Margin = new Thickness(0, 0, 12, 0);
+            headerRow.Children.Add(folderArt);
+
+            var titleCol = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            titleCol.Children.Add(new TextBlock
+            {
+                Text = "📝 Descripción de la carpeta: " + folderTitle,
+                FontWeight = FontWeights.Bold,
+                FontSize = 14,
+                Foreground = VectorStudio.Brush(p.AccentLight)
+            });
+            titleCol.Children.Add(new TextBlock
+            {
+                Text = "Contenido detectado adentro: " + autoContent,
+                FontSize = 11.3,
+                Foreground = VectorStudio.Brush(p.TextMuted),
+                Margin = new Thickness(0, 2, 0, 0)
+            });
+            headerRow.Children.Add(titleCol);
+            stack.Children.Add(headerRow);
+
+            stack.Children.Add(new TextBlock
+            {
+                Text = "Escribe qué lleva esta carpeta adentro (se mostrará en las tarjetas, lista, barra superior y al pasar el mouse):",
+                FontSize = 11.8,
+                Foreground = VectorStudio.Brush(p.TextMuted),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 8)
+            });
+
+            var tb = new TextBox
+            {
+                Text = currentDesc,
+                Height = 74,
+                TextWrapping = TextWrapping.Wrap,
+                AcceptsReturn = false,
+                Padding = new Thickness(9, 7, 9, 7),
+                FontSize = 12.8,
+                Background = VectorStudio.Brush(p.BgCanvas),
+                Foreground = VectorStudio.Brush(p.TextMain),
+                BorderBrush = VectorStudio.Brush(p.Accent),
+                BorderThickness = new Thickness(1.2)
+            };
+            stack.Children.Add(tb);
+
+            var toolsRow = new DockPanel { Margin = new Thickness(0, 12, 0, 0) };
+
+            var leftBtns = new StackPanel { Orientation = Orientation.Horizontal };
+            var btnAuto = CreatePillButton("✨ Auto-describir contenido", "Generar automáticamente una descripción con lo que lleva la carpeta adentro", () =>
+            {
+                tb.Text = FolderDescriptionManager.GenerateSmartAutoDescription(targetFolder);
+                tb.Focus();
+                tb.SelectAll();
+            });
+            btnAuto.Background = VectorStudio.Brush("#183028");
+            btnAuto.BorderBrush = VectorStudio.Brush("#2ECC71");
+            ((TextBlock)btnAuto.Child).Foreground = VectorStudio.Brush("#A3F7BF");
+
+            var btnClear = CreatePillButton("🗑 Borrar", "Quitar la descripción personalizada", () =>
+            {
+                tb.Text = "";
+                tb.Focus();
+            });
+            btnClear.Background = VectorStudio.Brush("#321B20");
+            btnClear.BorderBrush = VectorStudio.Brush("#E74C3C");
+            ((TextBlock)btnClear.Child).Foreground = VectorStudio.Brush("#FF7675");
+
+            leftBtns.Children.Add(btnAuto);
+            leftBtns.Children.Add(btnClear);
+            DockPanel.SetDock(leftBtns, Dock.Left);
+            toolsRow.Children.Add(leftBtns);
+
+            bool confirmed = false;
+            string finalVal = currentDesc;
+
+            var rightBtns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            var ok = CreatePillButton("💾 Guardar (Enter)", "Guardar la descripción de la carpeta", () =>
+            {
+                confirmed = true;
+                finalVal = tb.Text;
+                win.Close();
+            });
+            ok.Background = VectorStudio.Brush(p.SelectBg);
+            ok.BorderBrush = VectorStudio.Brush(p.Accent);
+            ((TextBlock)ok.Child).FontWeight = FontWeights.Bold;
+            ((TextBlock)ok.Child).Foreground = VectorStudio.Brush(p.TextMain);
+
+            var cancel = CreatePillButton("Cancelar", "Cerrar sin cambios", () => win.Close());
+            cancel.Background = VectorStudio.Brush(p.BgChrome);
+            cancel.BorderBrush = VectorStudio.Brush(p.Border);
+            ((TextBlock)cancel.Child).Foreground = VectorStudio.Brush(p.TextMuted);
+
+            rightBtns.Children.Add(ok);
+            rightBtns.Children.Add(cancel);
+            DockPanel.SetDock(rightBtns, Dock.Right);
+            toolsRow.Children.Add(rightBtns);
+
+            stack.Children.Add(toolsRow);
+
+            tb.KeyDown += (s, e) =>
+            {
+                if (e.Key == Key.Enter)
+                {
+                    confirmed = true;
+                    finalVal = tb.Text;
+                    win.Close();
+                    e.Handled = true;
+                }
+                else if (e.Key == Key.Escape)
+                {
+                    win.Close();
+                    e.Handled = true;
+                }
+            };
+
+            outer.Child = stack;
+            win.Content = outer;
+            win.Loaded += (s, e) => { tb.Focus(); tb.SelectAll(); };
+            win.ShowDialog();
+
+            if (confirmed)
+            {
+                FolderDescriptionManager.SetDescription(targetFolder, finalVal, ActiveStableFolderIcoPath, Config.ReplaceWindowsExplorer);
+                if (LeftPane != null) { LeftPane.ReadEntries(); LeftPane.RenderItems(); }
+                if (IsSplitView && RightPane != null) { RightPane.ReadEntries(); RightPane.RenderItems(); }
+                if (ActivePane != null) UpdateInfoDock(ActivePane.GetCurrentCursorItem());
+                if (_statusLeftLabel != null)
+                {
+                    _statusLeftLabel.Text = string.IsNullOrWhiteSpace(finalVal)
+                        ? "✔ Se quitó la descripción personalizada de '" + folderTitle + "'."
+                        : "✔ Descripción guardada en '" + folderTitle + "': " + finalVal.Trim();
+                }
+            }
         }
 
         public void DeleteSelectedItems()
@@ -6562,6 +7757,7 @@ namespace NexusFM
             else if (e.Key == Key.F7) { CreateNewFolderDialog(); e.Handled = true; }
             else if (e.Key == Key.F8 || (e.Key == Key.Delete && !(Keyboard.FocusedElement is TextBox))) { DeleteSelectedItems(); e.Handled = true; }
             else if (e.Key == Key.F9) { ToggleDiskAnalyzer(); e.Handled = true; }
+            else if (e.Key == Key.F10 || e.SystemKey == Key.F10) { OpenFolderDescriptionDialog(null); e.Handled = true; }
             else if (e.Key == Key.F11) { ToggleInfoDock(); e.Handled = true; }
             else if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
             {
@@ -6614,6 +7810,12 @@ namespace NexusFM
             _searchBox.Background = VectorStudio.Brush(p.BgCanvas);
             _searchBox.Foreground = VectorStudio.Brush(p.TextMain);
             _searchBox.BorderBrush = VectorStudio.Brush(p.Accent);
+
+            if (_btnDescribeFolderToggle != null)
+            {
+                _btnDescribeFolderToggle.Background = VectorStudio.Brush(p.BgChrome);
+                _btnDescribeFolderToggle.BorderBrush = VectorStudio.Brush(p.Border);
+            }
 
             if (_btnMoveToFolderToggle != null)
             {
@@ -6770,6 +7972,29 @@ namespace NexusFM
         [STAThread]
         public static void Main(string[] args)
         {
+            bool isSilentStartup = args != null && args.Any(a =>
+                string.Equals(a, "--startup", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(a, "/startup", StringComparison.OrdinalIgnoreCase));
+
+            bool isRefreshIconsOnly = args != null && args.Any(a =>
+                string.Equals(a, "--refresh-icons", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(a, "/refresh-icons", StringComparison.OrdinalIgnoreCase));
+
+            if (isRefreshIconsOnly)
+            {
+                try
+                {
+                    var cfg = UserConfig.Load();
+                    string exeDir = System.IO.Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName);
+                    string assetsDir = System.IO.Path.Combine(exeDir, "assets");
+                    string accent = !string.IsNullOrEmpty(cfg.CustomAccentHex) ? cfg.CustomAccentHex : "#00F0FF";
+                    string icoPath = IconExtractor.GenerateMultiSizeFolderIco(assetsDir, accent);
+                    IconExtractor.PrecompileAndRepairDesktopAppIcons(icoPath, cfg.ReplaceWindowsExplorer, cfg.RecentLocations);
+                }
+                catch { }
+                return;
+            }
+
             string startupPath = ParseStartupArgument(args);
 
             // Si ya hay una instancia de NexusFM abierta, enviarle la ruta para no duplicar ventanas
@@ -6779,16 +8004,19 @@ namespace NexusFM
                 var existing = Process.GetProcessesByName(current.ProcessName).FirstOrDefault(p => p.Id != current.Id);
                 if (existing != null)
                 {
-                    string exeDir = System.IO.Path.GetDirectoryName(current.MainModule.FileName);
-                    string ipcFile = System.IO.Path.Combine(exeDir, "nexus-ipc-open.txt");
-                    File.WriteAllText(ipcFile, startupPath ?? "", Encoding.UTF8);
+                    if (!isSilentStartup)
+                    {
+                        string exeDir = System.IO.Path.GetDirectoryName(current.MainModule.FileName);
+                        string ipcFile = System.IO.Path.Combine(exeDir, "nexus-ipc-open.txt");
+                        File.WriteAllText(ipcFile, startupPath ?? "", Encoding.UTF8);
+                    }
                     return;
                 }
             }
             catch { }
 
             var app = new Application();
-            app.Run(new MainWindow(startupPath));
+            app.Run(new MainWindow(startupPath, isSilentStartup));
         }
     }
 }

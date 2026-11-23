@@ -10,7 +10,10 @@ dist/
 # OS / IDE
 .DS_Store
 Thumbs.db
+desktop.ini
+**/desktop.ini
 nexus-config.ini
+nexus-descriptions.ini
 nexus-ipc-open.txt
 assets/app-icons/
 assets/nexus-folder-*.ico
