@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -9,51 +10,118 @@ class IconGen
     static void Main(string[] args)
     {
         string outPath = args.Length > 0 ? args[0] : "nexus-folder.ico";
+        string accentHex = args.Length > 1 ? args[1] : "#4DA2DB";
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath)));
 
-        using (Bitmap bmp = new Bitmap(64, 64, PixelFormat.Format32bppArgb))
+        Color mainColor = ColorTranslator.FromHtml(accentHex);
+        Color darkColor = Color.FromArgb(255,
+            (int)(mainColor.R * 0.58),
+            (int)(mainColor.G * 0.58),
+            (int)(mainColor.B * 0.58));
+        Color lightColor = Color.FromArgb(255,
+            Math.Min(255, mainColor.R + 42),
+            Math.Min(255, mainColor.G + 42),
+            Math.Min(255, mainColor.B + 42));
+
+        int[] sizes = new int[] { 256, 64, 48, 32, 16 };
+        List<byte[]> pngFrames = new List<byte[]>();
+
+        foreach (int sz in sizes)
+        {
+            using (Bitmap bmp = RenderFolderBitmap(sz, mainColor, darkColor, lightColor))
+            using (MemoryStream ms = new MemoryStream())
+            {
+                bmp.Save(ms, ImageFormat.Png);
+                pngFrames.Add(ms.ToArray());
+            }
+        }
+
+        SaveMultiFrameIco(sizes, pngFrames, outPath);
+    }
+
+    static Bitmap RenderFolderBitmap(int size, Color mainColor, Color darkColor, Color lightColor)
+    {
+        Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
         using (Graphics g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             g.Clear(Color.Transparent);
 
-            // Parte trasera de la carpeta (pestaña Dolphin Teal oscuro)
-            using (GraphicsPath backPath = RoundedRect(new Rectangle(4, 10, 26, 12), 4))
-            using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(255, 19, 132, 110)))
+            float s = size / 64f;
+
+            // 1. Parte trasera con pestaña angulada estilo NexusFM Breeze
+            using (GraphicsPath backPath = new GraphicsPath())
             {
-                g.FillPath(backBrush, backPath);
+                PointF[] pts = new PointF[]
+                {
+                    new PointF(4 * s, 10 * s),
+                    new PointF(25 * s, 10 * s),
+                    new PointF(30 * s, 16 * s),
+                    new PointF(60 * s, 16 * s),
+                    new PointF(60 * s, 52 * s),
+                    new PointF(4 * s, 52 * s)
+                };
+                backPath.AddPolygon(pts);
+                using (SolidBrush backBrush = new SolidBrush(darkColor))
+                {
+                    g.FillPath(backBrush, backPath);
+                }
             }
 
-            using (GraphicsPath backBody = RoundedRect(new Rectangle(4, 15, 56, 40), 5))
-            using (SolidBrush backBrush = new SolidBrush(Color.FromArgb(255, 19, 132, 110)))
+            // 2. Sombra interior de bolsillo
+            using (SolidBrush pocketShadow = new SolidBrush(Color.FromArgb(110, 0, 0, 0)))
             {
-                g.FillPath(backBrush, backBody);
+                g.FillRectangle(pocketShadow, 4 * s, 20 * s, 56 * s, Math.Max(1f, 2f * s));
             }
 
-            // Cuerpo frontal de la carpeta (Dolphin Emerald Teal brillante)
-            using (GraphicsPath frontPath = RoundedRect(new Rectangle(4, 21, 56, 36), 5))
+            // 3. Cuerpo frontal Breeze con gradiente y emblema sutil NexusFM
+            RectangleF frontRect = new RectangleF(4 * s, 22 * s, 56 * s, 34 * s);
+            using (GraphicsPath frontPath = RoundedRect(frontRect, Math.Max(2f, 4f * s)))
             using (LinearGradientBrush frontBrush = new LinearGradientBrush(
-                new Rectangle(4, 21, 56, 36),
-                Color.FromArgb(255, 30, 195, 162),
-                Color.FromArgb(255, 20, 150, 125),
-                LinearGradientMode.Vertical))
+                frontRect, lightColor, mainColor, LinearGradientMode.Vertical))
             {
                 g.FillPath(frontBrush, frontPath);
             }
 
-            // Brillo superior sutil estilo KDE Breeze
-            using (Pen highlightPen = new Pen(Color.FromArgb(140, 120, 255, 230), 1.5f))
+            // 4. Brillo superior e inferior
+            using (Pen topHighlight = new Pen(Color.FromArgb(150, 255, 255, 255), Math.Max(1f, 1.4f * s)))
             {
-                g.DrawLine(highlightPen, 7, 22, 57, 22);
+                g.DrawLine(topHighlight, 6 * s, 23 * s, 58 * s, 23 * s);
+            }
+            using (SolidBrush bottomLip = new SolidBrush(darkColor))
+            {
+                g.FillRectangle(bottomLip, 5 * s, 54 * s, 54 * s, Math.Max(1f, 2f * s));
             }
 
-            SavePngAsIco(bmp, outPath);
+            // 5. Detalle geométrico Nexus en el centro de la carpeta (para tamaños >= 32)
+            if (size >= 32)
+            {
+                float cx = 32 * s;
+                float cy = 39 * s;
+                float r = 6.5f * s;
+                PointF[] diamond = new PointF[]
+                {
+                    new PointF(cx, cy - r),
+                    new PointF(cx + r, cy),
+                    new PointF(cx, cy + r),
+                    new PointF(cx - r, cy)
+                };
+                using (SolidBrush emblemFill = new SolidBrush(Color.FromArgb(45, 0, 0, 0)))
+                using (Pen emblemPen = new Pen(Color.FromArgb(165, 255, 255, 255), Math.Max(1f, 1.4f * s)))
+                {
+                    g.FillPolygon(emblemFill, diamond);
+                    g.DrawPolygon(emblemPen, diamond);
+                }
+            }
         }
+        return bmp;
     }
 
-    static GraphicsPath RoundedRect(Rectangle bounds, int radius)
+    static GraphicsPath RoundedRect(RectangleF bounds, float radius)
     {
-        int d = radius * 2;
+        float d = radius * 2f;
         GraphicsPath path = new GraphicsPath();
         path.AddArc(bounds.Left, bounds.Top, d, d, 180, 90);
         path.AddArc(bounds.Right - d, bounds.Top, d, d, 270, 90);
@@ -63,32 +131,35 @@ class IconGen
         return path;
     }
 
-    static void SavePngAsIco(Bitmap bmp, string icoPath)
+    static void SaveMultiFrameIco(int[] sizes, List<byte[]> frames, string icoPath)
     {
-        using (MemoryStream pngStream = new MemoryStream())
+        using (FileStream fs = new FileStream(icoPath, FileMode.Create))
+        using (BinaryWriter bw = new BinaryWriter(fs))
         {
-            bmp.Save(pngStream, ImageFormat.Png);
-            byte[] pngBytes = pngStream.ToArray();
+            int count = sizes.Length;
+            bw.Write((short)0);
+            bw.Write((short)1);
+            bw.Write((short)count);
 
-            using (FileStream fs = new FileStream(icoPath, FileMode.Create))
-            using (BinaryWriter bw = new BinaryWriter(fs))
+            int offset = 6 + (16 * count);
+            for (int i = 0; i < count; i++)
             {
-                // ICONDIR header
-                bw.Write((short)0);
-                bw.Write((short)1);
-                bw.Write((short)1);
-
-                // ICONDIRENTRY
-                bw.Write((byte)bmp.Width);
-                bw.Write((byte)bmp.Height);
+                int sz = sizes[i];
+                byte bSize = (sz >= 256) ? (byte)0 : (byte)sz;
+                bw.Write(bSize);
+                bw.Write(bSize);
                 bw.Write((byte)0);
                 bw.Write((byte)0);
                 bw.Write((short)1);
                 bw.Write((short)32);
-                bw.Write(pngBytes.Length);
-                bw.Write(22); // offset
+                bw.Write(frames[i].Length);
+                bw.Write(offset);
+                offset += frames[i].Length;
+            }
 
-                bw.Write(pngBytes);
+            for (int i = 0; i < count; i++)
+            {
+                bw.Write(frames[i]);
             }
         }
     }

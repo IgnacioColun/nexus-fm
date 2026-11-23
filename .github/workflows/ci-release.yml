@@ -16,11 +16,12 @@ jobs:
 
       - name: Compile C# WPF Native Executable (Zero External Dependencies)
         run: |
-          & "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /out:"NexusFM.exe" `
+          & "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /win32icon:"assets\nexus-folder.ico" /out:"NexusFM.exe" `
             /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationFramework.dll" `
             /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\PresentationCore.dll" `
             /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" `
             /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Xaml.dll" `
+            /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Drawing.dll" `
             "src-csharp\NexusFM.cs"
 
       - name: Upload NexusFM.exe Artifact

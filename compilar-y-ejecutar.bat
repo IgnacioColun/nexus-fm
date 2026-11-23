@@ -14,24 +14,23 @@ if not exist %CSC% (
     exit /b 1
 )
 
-:: 1. Generar el icono verde esmeralda estilo KDE Dolphin si no existe
-if not exist "%~dp0assets\nexus-folder.ico" (
-    echo Generando icono KDE Dolphin Emerald Teal...
-    %CSC% /nologo /target:exe /out:"%~dp0src-csharp\IconGen.exe" /r:System.Drawing.dll "%~dp0src-csharp\IconGen.cs"
-    "%~dp0src-csharp\IconGen.exe" "%~dp0assets\nexus-folder.ico"
-    del /q "%~dp0src-csharp\IconGen.exe" 2>nul
-)
+:: 1. Generar el icono multi-resolucion (256/64/48/32/16px) de NexusFM
+echo Generando icono multi-resolucion de carpetas NexusFM...
+%CSC% /nologo /target:exe /out:"%~dp0src-csharp\IconGen.exe" /r:System.Drawing.dll "%~dp0src-csharp\IconGen.cs"
+"%~dp0src-csharp\IconGen.exe" "%~dp0assets\nexus-folder.ico"
+del /q "%~dp0src-csharp\IconGen.exe" 2>nul
 
 :: 2. Cerrar instancia previa si esta abierta para poder actualizar el .exe
 taskkill /f /im NexusFM.exe >nul 2>&1
 
-:: 3. Compilar NexusFM.exe con el icono Dolphin incrustado
+:: 3. Compilar NexusFM.exe con soporte de extraccion de iconos de juegos/softwares
 echo Compilando NexusFM.exe ...
 %CSC% /nologo /target:winexe /win32icon:"%~dp0assets\nexus-folder.ico" /out:"%~dp0NexusFM.exe" ^
   /r:"%WPF_DIR%\PresentationFramework.dll" ^
   /r:"%WPF_DIR%\PresentationCore.dll" ^
   /r:"%WPF_DIR%\WindowsBase.dll" ^
   /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Xaml.dll" ^
+  /r:"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Drawing.dll" ^
   "%~dp0src-csharp\NexusFM.cs"
 
 if %ERRORLEVEL% NEQ 0 (
@@ -40,5 +39,5 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b %ERRORLEVEL%
 )
 
-echo [OK] NexusFM.exe compilado exitosamente con estilo minimalista KDE Dolphin!
+echo [OK] NexusFM.exe compilado exitosamente!
 start "" "%~dp0NexusFM.exe"
