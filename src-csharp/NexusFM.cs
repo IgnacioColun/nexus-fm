@@ -2356,10 +2356,22 @@ namespace NexusFM
             if (string.Equals(path.TrimEnd('\\'), desktop.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
                 return "Escritorio";
 
+            string downloads = System.IO.Path.Combine(user, "Downloads");
+            if (string.Equals(path.TrimEnd('\\'), downloads.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                return "Descargas";
+
             string trimmed = path.TrimEnd('\\');
             if (trimmed.EndsWith(":")) return "Disco (" + trimmed + ")";
             string name = System.IO.Path.GetFileName(trimmed);
             return string.IsNullOrEmpty(name) ? path : name;
+        }
+
+        public static bool IsDownloadsDirectory(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            string user = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string downloads = System.IO.Path.Combine(user, "Downloads");
+            return string.Equals(path.TrimEnd('\\'), downloads.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
         }
 
         public void SetCategoryFilter(string catCode, string catTitle)
@@ -2579,6 +2591,11 @@ namespace NexusFM
                         if (!string.IsNullOrEmpty(catFilter) && cat != catFilter)
                             continue;
 
+                        bool isRecentDownload = (DateTime.Now - f.LastWriteTime).TotalHours <= 24;
+                        string modText = (isRecentDownload && IsDownloadsDirectory(ActiveTab.CurrentPath))
+                            ? "⬇ Reciente • " + FormatRelativeTime(f.LastWriteTime)
+                            : FormatRelativeTime(f.LastWriteTime);
+
                         CurrentItems.Add(new FileItem
                         {
                             Name = f.Name,
@@ -2590,11 +2607,20 @@ namespace NexusFM
                             ModifiedDate = f.LastWriteTime,
                             CreatedDate = f.CreationTime,
                             AccessedDate = f.LastAccessTime,
-                            ModifiedText = FormatRelativeTime(f.LastWriteTime),
+                            ModifiedText = modText,
                             Category = cat
                         });
                     }
                     catch { }
+                }
+
+                // En la carpeta Descargas (Downloads), mostrar primero los archivos recién descargados arriba del todo
+                if (IsDownloadsDirectory(ActiveTab.CurrentPath))
+                {
+                    CurrentItems = CurrentItems
+                        .OrderByDescending(x => !x.IsDirectory && (DateTime.Now - x.ModifiedDate).TotalDays <= 7)
+                        .ThenByDescending(x => x.ModifiedDate)
+                        .ToList();
                 }
             }
             catch { }
@@ -4133,14 +4159,26 @@ namespace NexusFM
 
                 if (!Config.ReplaceWindowsExplorer) return;
 
-                // 1. Verificar si el diálogo externo #32770 activo ya se cerró
-                if (_activeExternalDialogHwnd != IntPtr.Zero && !NativeWin32.IsWindow(_activeExternalDialogHwnd))
+                // 1. Asegurar que ningún diálogo "Guardar como" / "Abrir" (#32770) de navegadores o programas
+                // sea ocultado ni desviado por NexusFM: dejar que Windows guarde directamente en Descargas o donde elijas
+                if (_activeExternalDialogHwnd != IntPtr.Zero)
                 {
-                    _activeExternalDialogHwnd = IntPtr.Zero;
-                    _openFolderPickerBanner.Visibility = Visibility.Collapsed;
+                    RestoreCloakedExternalFileDialog(true);
                 }
 
-                // 2. Interceptar ventanas abiertas de Windows Explorer (CabinetWClass y ExploreWClass)
+                IntPtr dlg = IntPtr.Zero;
+                while ((dlg = NativeWin32.FindWindowEx(IntPtr.Zero, dlg, "#32770", null)) != IntPtr.Zero)
+                {
+                    if (!NativeWin32.IsWindowVisible(dlg)) continue;
+                    NativeWin32.RECT r;
+                    if (NativeWin32.GetWindowRect(dlg, out r) && (r.Left < -10000 || r.Top < -10000))
+                    {
+                        NativeWin32.SetWindowPos(dlg, IntPtr.Zero, 180, 120, 0, 0,
+                            NativeWin32.SWP_NOSIZE | NativeWin32.SWP_NOZORDER | NativeWin32.SWP_SHOWWINDOW);
+                    }
+                }
+
+                // 2. Interceptar únicamente ventanas abiertas de Windows Explorer (CabinetWClass y ExploreWClass)
                 IntPtr explorerHwnd = NativeWin32.FindWindowEx(IntPtr.Zero, IntPtr.Zero, "CabinetWClass", null);
                 if (explorerHwnd == IntPtr.Zero)
                     explorerHwnd = NativeWin32.FindWindowEx(IntPtr.Zero, IntPtr.Zero, "ExploreWClass", null);
@@ -4162,43 +4200,6 @@ namespace NexusFM
                         ActivePane.LoadDirectory(targetPath, true);
                     }
                     return;
-                }
-
-                // 3. Interceptar diálogos "Open Folder" / "Seleccionar carpeta" / "Abrir" (#32770) de cualquier software
-                if (_activeExternalDialogHwnd == IntPtr.Zero)
-                {
-                    IntPtr dlg = IntPtr.Zero;
-                    while ((dlg = NativeWin32.FindWindowEx(IntPtr.Zero, dlg, "#32770", null)) != IntPtr.Zero)
-                    {
-                        if (!NativeWin32.IsWindowVisible(dlg)) continue;
-                        if (_ignoredExternalDialogs.Contains(dlg)) continue;
-
-                        uint pid;
-                        NativeWin32.GetWindowThreadProcessId(dlg, out pid);
-                        if (pid == myPid) continue;
-
-                        bool isFolderTree;
-                        if (NativeWin32.IsCommonFileOrFolderDialog(dlg, out isFolderTree))
-                        {
-                            _activeExternalDialogHwnd = dlg;
-                            NativeWin32.GetWindowRect(dlg, out _activeExternalDialogOrigRect);
-                            _activeExternalDialogTitle = NativeWin32.GetWindowTitle(dlg);
-                            string procName = "Software";
-                            try { procName = Process.GetProcessById((int)pid).ProcessName; } catch { }
-
-                            // Ocultar fuera de pantalla la ventana clásica de Windows Explorer del diálogo sin bloquearla
-                            NativeWin32.SetWindowPos(dlg, IntPtr.Zero, -32000, -32000, 0, 0,
-                                NativeWin32.SWP_NOSIZE | NativeWin32.SWP_NOZORDER | NativeWin32.SWP_NOACTIVATE);
-
-                            _openFolderPickerBannerText.Text = string.Format(
-                                "📂 OPEN FOLDER [{0} — \"{1}\"]: Selecciona la carpeta y haz clic en [✔ Abrir Carpeta en el Software] o presiona Ctrl+Enter",
-                                procName, string.IsNullOrEmpty(_activeExternalDialogTitle) ? "Seleccionar carpeta" : _activeExternalDialogTitle);
-                            _openFolderPickerBanner.Visibility = Visibility.Visible;
-
-                            BringNexusToFront();
-                            break;
-                        }
-                    }
                 }
             };
             _explorerInterceptorTimer.Start();
